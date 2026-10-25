@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diarization Inspector</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='3' width='9' height='3' rx='1' fill='%234e79a7'/%3E%3Crect x='6' y='7' width='9' height='3' rx='1' fill='%23f28e2b'/%3E%3Crect x='2' y='11' width='7' height='3' rx='1' fill='%2359a14f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Diarization Inspector</h1>
+    <span class="muted">Sortformer · NeMo</span>
+    <span id="model-badge" class="badge">no model loaded</span>
+  </header>
+
+  <main>
+    <div class="grid inputs">
+      <section class="block">
+        <span class="block-label">Inputs</span>
+
+        <div class="field">
+          <label for="checkpoint">Checkpoint <small>.nemo or .ckpt on the server</small></label>
+          <div class="row">
+            <input id="checkpoint" placeholder="/path/to/model.nemo" spellcheck="false" autocomplete="off">
+            <button class="btn" data-browse="checkpoint">Browse</button>
+            <button class="btn" id="load-btn">Load</button>
+          </div>
+          <div id="model-info" class="hint"></div>
+        </div>
+
+        <div class="field" data-drop="audio">
+          <label for="audio">Audio <small>server path, browse, upload, or drop a file</small></label>
+          <div class="row">
+            <input id="audio" placeholder="/path/to/audio.wav" spellcheck="false" autocomplete="off">
+            <button class="btn" data-browse="audio">Browse</button>
+            <button class="btn" data-upload="audio">Upload</button>
+            <button class="btn icon" id="prev-file" title="Previous file in this folder (runs it)">◀</button>
+            <button class="btn icon" id="next-file" title="Next file in this folder (runs it)">▶</button>
+          </div>
+        </div>
+
+        <div class="field" data-drop="ref">
+          <label for="ref">Reference RTTM <small>optional · ground truth, shows the errors</small></label>
+          <div class="row">
+            <input id="ref" placeholder="found automatically next to the audio, or ../rttm/" spellcheck="false" autocomplete="off">
+            <button class="btn" data-browse="ref">Browse</button>
+            <button class="btn" data-upload="ref">Upload</button>
+          </div>
+        </div>
+
+        <div class="field" data-drop="hyp">
+          <label for="hyp">Prediction RTTM <small>optional · inspect an existing output instead of running the model</small></label>
+          <div class="row">
+            <input id="hyp" placeholder="leave empty to run the checkpoint" spellcheck="false" autocomplete="off">
+            <button class="btn" data-browse="hyp">Browse</button>
+            <button class="btn" data-upload="hyp">Upload</button>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="run-btn" class="btn primary">Run</button>
+          <span id="status" class="muted"></span>
+        </div>
+        <div id="error" class="error" hidden></div>
+      </section>
+
+      <section class="block">
+        <span class="block-label">Post-processing &amp; scoring</span>
+        <div id="settings" class="settings"></div>
+        <p class="hint">Changes re-score instantly: the model output is cached, only post-processing and scoring re-run.</p>
+        <div class="row tight">
+          <button class="btn small" id="reset-settings">Reset</button>
+          <button class="btn small" id="copy-yaml" title="Copy as a NeMo postprocessing_yaml">Copy YAML</button>
+        </div>
+      </section>
+    </div>
+
+    <section id="results" hidden>
+      <div id="warnings"></div>
+      <div id="metrics" class="metrics"></div>
+
+      <section class="block viewer">
+        <span class="block-label">Timeline</span>
+        <div class="toolbar">
+          <button id="play-btn" class="btn icon" title="Play / pause (space)">▶</button>
+          <span id="time" class="time">0:00.00 / 0:00.00</span>
+          <select id="speed" title="Playback speed">
+            <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+          </select>
+          <span class="sep"></span>
+          <button id="zoom-out" class="btn icon" title="Zoom out (−)">−</button>
+          <button id="zoom-in" class="btn icon" title="Zoom in (+)">+</button>
+          <button id="zoom-fit" class="btn" title="Whole file (0)">Fit</button>
+          <span class="sep"></span>
+          <button id="prev-err" class="btn" title="Previous error (p)">◀ error</button>
+          <button id="next-err" class="btn" title="Next error (n)">error ▶</button>
+          <label class="check" id="show-all-wrap"><input type="checkbox" id="show-all"> <span id="show-all-label">silent outputs</span></label>
+          <span class="grow"></span>
+          <button id="dl-rttm" class="btn">Download RTTM</button>
+          <button id="dl-json" class="btn" title="Everything, including the raw speaker probabilities">JSON</button>
+        </div>
+        <canvas id="overview" title="Whole file · red = errors · click or drag to move"></canvas>
+        <div class="canvas-wrap">
+          <canvas id="timeline"></canvas>
+          <div id="tooltip" hidden></div>
+        </div>
+        <p class="hint">
+          wheel: zoom · drag or shift+wheel: pan · click: seek · shift+drag: zoom to region · double-click: fit ·
+          keys: <kbd>space</kbd> play <kbd>←</kbd><kbd>→</kbd> pan <kbd>+</kbd><kbd>−</kbd> zoom <kbd>0</kbd> fit
+          <kbd>n</kbd><kbd>p</kbd> next / previous error
+        </p>
+      </section>
+
+      <div class="grid">
+        <section class="block">
+          <span class="block-label">Errors <span id="error-count" class="count"></span></span>
+          <div class="sorter" id="error-sort">sort by
+            <button class="btn small on" data-sort="time">time</button>
+            <button class="btn small" data-sort="size">size</button>
+          </div>
+          <div id="errors" class="scroll"></div>
+        </section>
+        <section class="block">
+          <span class="block-label">Speakers</span>
+          <div id="speakers" class="scroll"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="browser">
+    <div class="dlg-head">
+      <strong id="br-title">Select file</strong>
+      <button class="btn icon" id="br-close" title="Close">✕</button>
+    </div>
+    <input id="br-path" spellcheck="false" autocomplete="off" title="Type a folder and press Enter">
+    <ul id="br-list"></ul>
+  </dialog>
+  <input type="file" id="file-input" hidden>
+  <audio id="player" preload="auto"></audio>
+</body>
+</html>

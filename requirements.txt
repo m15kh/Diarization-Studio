@@ -1,0 +1,5 @@
+# Install into the Python environment that already has NeMo (nemo_toolkit[asr]) and PyTorch.
+# NeMo already brings numpy, scipy, soundfile and librosa.
+fastapi
+uvicorn
+python-multipart
