@@ -66,6 +66,7 @@ What you get:
 - **Metrics**: DER = missed + false alarm + confusion, speaker count, overlap, inference time / RTF.
 - **Timeline** (all rows share one zoomable time axis):
   - the waveform;
+  - **diarization**: who speaks when, one lane per predicted speaker, with highlighted columns where 2+ speakers talk at once;
   - each reference speaker, with the predicted speaker it was mapped to drawn below in the same color;
   - the model's speaker probability, with the onset/offset thresholds as dashed lines;
   - error lanes: missed / false alarm / confusion / reference overlap (gray = inside the collar, not scored);

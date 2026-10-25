@@ -180,6 +180,7 @@ function buildView(res) {
     hypVisible: [],
   };
   v.maxProb = v.probs?.map((p) => p.reduce((m, x) => (x > m ? x : m), 0));
+  v.hypOverlap = overlapRegions(v.hypSegs);
   // A predicted speaker takes the color of the reference speaker it is mapped to.
   const map = res.score?.hyp_to_ref || new Array(nHyp).fill(null);
   let extra = v.refColor.length;
@@ -188,6 +189,27 @@ function buildView(res) {
     v.hypColor[h] = map[h] != null ? v.refColor[map[h]] : PALETTE[(res.ref ? extra++ : h) % PALETTE.length];
   }
   return v;
+}
+
+// Where two or more speakers talk at once: [[start, end], ...]. `segsBySpeaker` holds [[start, end], ...] per speaker.
+function overlapRegions(segsBySpeaker) {
+  const events = segsBySpeaker.flatMap((segs, k) => segs.flatMap(([s, e]) => [[s, 1, k], [e, -1, k]]));
+  events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);  // at the same time, ends first
+  const active = new Array(segsBySpeaker.length).fill(0);  // per speaker, so self-overlap counts once
+  const out = [];
+  let talking = 0, start = 0;
+  for (const [t, d, k] of events) {
+    const before = talking;
+    active[k] += d;
+    if (d > 0 && active[k] === 1) talking++;
+    if (d < 0 && active[k] === 0) talking--;
+    if (before < 2 && talking >= 2) start = t;
+    if (before >= 2 && talking < 2 && t > start) {
+      const last = out[out.length - 1];
+      if (last && last[1] >= start) last[1] = t; else out.push([start, t]);
+    }
+  }
+  return out;
 }
 
 function renderMetrics() {
@@ -233,6 +255,14 @@ function renderTimeline(keepView) {
     probs: v.probs?.[h], step: res.frame_step, onset, offset, muted: !v.hypSegs[h].length,
   });
 
+  // who speaks when: one lane per predicted speaker, overlapped speech highlighted across all lanes
+  rows.push({ kind: 'header', label: 'Diarization · who speaks when · highlighted: 2+ speakers at once' });
+  res.hyp.names.forEach((name, h) => {
+    if (!(showAll || v.hypVisible[h] || res.score?.hyp_to_ref[h] != null)) return;
+    rows.push({ kind: 'seg', label: name, color: v.hypColor[h], segs: v.hypSegs[h], highlight: v.hypOverlap,
+                muted: !v.hypSegs[h].length });
+  });
+
   if (res.score) {
     const map = res.score.hyp_to_ref;
     rows.push({ kind: 'header', label: 'Speakers · reference ▸ prediction' });
@@ -256,8 +286,8 @@ function renderTimeline(keepView) {
     rows.push({ kind: 'err', label: 'false alarm', colorVar: '--fa', segs: lanes.fa, unscored: lanes.unscored });
     rows.push({ kind: 'err', label: 'confusion', colorVar: '--conf', segs: lanes.conf, unscored: lanes.unscored });
     rows.push({ kind: 'err', label: 'overlap (ref)', colorVar: '--overlap', segs: lanes.overlap });
-  } else {
-    rows.push({ kind: 'header', label: 'Prediction' });
+  } else if (res.probs) {  // without probabilities this would repeat the diarization lanes
+    rows.push({ kind: 'header', label: 'Speaker probability · dashed: onset / offset' });
     res.hyp.names.forEach((name, h) => {
       if (showAll || v.hypVisible[h]) rows.push(hypRow(h, name, h % 2 === 1));
       else hidden++;

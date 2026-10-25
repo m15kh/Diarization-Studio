@@ -2,8 +2,8 @@
 // all sharing one time axis, plus an overview strip of the whole file.
 // Mouse: wheel = zoom, shift+wheel / drag = pan, click = seek, shift+drag = zoom to region,
 // double-click = fit. Rows are plain objects built by app.js:
-//   { kind: 'header' | 'ref' | 'hyp' | 'err', label, color | colorVar, segs: [[start, end], ...],
-//     probs?, step?, onset?, offset?, unscored?, band?, muted? }
+//   { kind: 'header' | 'seg' | 'ref' | 'hyp' | 'err', label, color | colorVar, segs: [[start, end], ...],
+//     probs?, step?, onset?, offset?, unscored?, highlight?, band?, muted? }
 
 export const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2',
   '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
@@ -12,7 +12,7 @@ const GUTTER = 150;      // left column for lane labels (px)
 const PAD_RIGHT = 12;
 const MIN_SPAN = 0.05;   // deepest zoom: 50 ms across the plot
 const TICK_STEPS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
-const HEIGHT = { ruler: 22, wave: 100, header: 26, ref: 16, hyp: 28, err: 16 };
+const HEIGHT = { ruler: 22, wave: 100, header: 26, seg: 26, ref: 16, hyp: 28, err: 16 };
 
 export function fmtTime(t, digits = 2) {
   const scale = 10 ** digits;
@@ -162,6 +162,7 @@ export class Timeline {
     return {
       v, text: v('--text'), muted: v('--muted'), grid: v('--grid'), wave: v('--wave'), accent: v('--accent'),
       stripe: v('--stripe'), unscored: v('--unscored'), miss: v('--miss'), font: v('--font'),
+      lane: v('--lane'), highlight: v('--highlight'),
     };
   }
 
@@ -198,6 +199,7 @@ export class Timeline {
       ctx.save();
       ctx.beginPath(); ctx.rect(GUTTER, row.y, this.plotWidth, row.h); ctx.clip();
       if (row.kind === 'wave') this._drawWave(ctx, row, th);
+      else if (row.kind === 'seg') this._drawPills(ctx, row, th);
       else if (row.kind === 'ref') this._drawSegs(ctx, row.segs, row.y + 3, row.h - 6, row.color, 0.9);
       else if (row.kind === 'hyp') this._drawHyp(ctx, row, th);
       else if (row.kind === 'err') {
@@ -237,6 +239,41 @@ export class Timeline {
       if (e < a || s > b) continue;
       const x0 = this.timeToX(Math.max(s, a));
       ctx.fillRect(x0, y, Math.max(1, this.timeToX(Math.min(e, b)) - x0), h);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // One speaker as rounded bars on its own lane; `highlight` regions (overlapped speech) as glowing columns.
+  _drawPills(ctx, row, th) {
+    const [a, b] = this.view;
+    const top = row.y + 2, h = row.h - 4;
+    ctx.fillStyle = th.lane;
+    ctx.beginPath(); ctx.roundRect(GUTTER, top, this.plotWidth, h, 5); ctx.fill();
+
+    const pillTop = top + 3, ph = h - 6;
+    ctx.fillStyle = row.color;
+    ctx.beginPath();
+    for (const [s, e] of row.segs) {
+      if (e < a || s > b) continue;
+      const x0 = this.timeToX(s), w = Math.max(2, this.timeToX(e) - x0);
+      ctx.roundRect(x0, pillTop, w, ph, Math.min(ph / 2, w / 2));
+    }
+    ctx.fill();
+
+    ctx.fillStyle = ctx.strokeStyle = ctx.shadowColor = th.highlight;
+    ctx.lineWidth = 1;
+    for (const [s, e] of row.highlight || []) {
+      if (e < a || s > b) continue;
+      const x0 = Math.round(this.timeToX(s)), x1 = Math.round(Math.max(this.timeToX(e), x0 + 2));
+      ctx.globalAlpha = 0.12;
+      ctx.fillRect(x0, row.y, x1 - x0, row.h);
+      ctx.globalAlpha = 0.5;
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.moveTo(x0 + 0.5, row.y); ctx.lineTo(x0 + 0.5, row.y + row.h);
+      ctx.moveTo(x1 - 0.5, row.y); ctx.lineTo(x1 - 0.5, row.y + row.h);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
     }
     ctx.globalAlpha = 1;
   }
