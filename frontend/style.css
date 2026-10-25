@@ -207,8 +207,15 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
   font-size: 12px; font-weight: 600; color: var(--muted); background: var(--panel); border-bottom: 1px solid var(--border);
 }
 .table td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.table th.num { text-align: right; }
 .table td.num { text-align: right; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .table .btn.icon { width: 26px; height: 24px; font-size: 10px; }
+#folder-metrics:not(:empty) { margin-bottom: 12px; }
+#folder-table tr[data-f] { cursor: pointer; }
+#folder-table tr[data-f]:hover td { background: var(--label-bg); }
+#folder-table tr.active td { background: var(--accent-soft); }
+#folder-table td.fail { color: var(--miss); white-space: normal; }
+#folder-table .warn { color: var(--miss); }
 #errors tr[data-i] { cursor: pointer; }
 #errors tr[data-i]:hover td { background: var(--label-bg); }
 #errors tr.active td { background: var(--accent-soft); }
@@ -227,7 +234,8 @@ dialog {
 dialog[open] { display: flex; flex-direction: column; }
 dialog::backdrop { background: rgba(15, 23, 42, 0.4); }
 .dlg-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
-#br-path { margin: 10px 14px 6px; }
+.br-row { margin: 10px 14px 6px; }
+#br-use-dir[hidden] { display: none; }
 #br-list { flex: 1; margin: 0; padding: 0 8px 10px; overflow: auto; list-style: none; }
 #br-list li { display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-radius: 6px; font-size: 13px; cursor: pointer; }
 #br-list li:hover { background: var(--label-bg); }

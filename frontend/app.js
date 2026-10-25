@@ -6,6 +6,9 @@ const pct = (x, digits = 2) => (x == null ? '–' : `${(x * 100).toFixed(digits)
 const secs = (x) => `${x.toFixed(2)} s`;
 const basename = (p) => p.split(/[\\/]/).pop();
 const dot = (color) => `<span class="dot" style="background:${color}"></span>`;
+const isFolder = (path) => Boolean(path) && !/\.(wav|flac|mp3|ogg|opus|m4a|webm)$/i.test(path);
+const card = (label, value, sub = '', cls = '') => `<div class="metric ${cls}"><div class="m-label">${label}</div>
+  <div class="m-value">${value}</div><div class="m-sub" title="${sub}">${sub}</div></div>`;
 
 // NeMo PostProcessingParams (same names as the postprocessing YAML) + scoring options
 const SETTINGS = [
@@ -22,9 +25,9 @@ const PP_KEYS = SETTINGS.slice(0, 6).map((s) => s.key);
 
 const FIELDS = {
   checkpoint: { kind: 'checkpoint', title: 'a checkpoint (.nemo / .ckpt)' },
-  audio: { kind: 'audio', title: 'an audio file' },
-  ref: { kind: 'rttm', title: 'the reference RTTM' },
-  hyp: { kind: 'rttm', title: 'a prediction RTTM' },
+  audio: { kind: 'audio', title: 'an audio file or folder' },
+  ref: { kind: 'rttm', title: 'the reference RTTM (file or folder)' },
+  hyp: { kind: 'rttm', title: 'a prediction RTTM (file or folder)' },
 };
 
 const store = {
@@ -48,6 +51,9 @@ let lastAudio = '';     // audio path the RTTM fields were last paired with
 let pairing = Promise.resolve();
 let modelPath = '';
 let runSeq = 0;
+let batch = null;       // folder run: { path, ref_dir, hyp_dir, fields, checkpoint, rows: [{ audio, ref, hyp, res?, error? }] }
+let batchSeq = 0;
+let folderSort = 'name';
 let errorSort = 'time';
 let picker = null;
 let rescoreTimer = null;
@@ -119,7 +125,11 @@ async function loadModel() {
   }
 }
 
-async function run() {
+function run() {
+  return isFolder(val('audio')) ? runFolder() : runFile();
+}
+
+async function runFile() {
   clearTimeout(rescoreTimer);
   const body = { audio: val('audio'), checkpoint: val('checkpoint'), ref_rttm: val('ref'), hyp_rttm: val('hyp'), ...getSettings() };
   if (!body.audio) return showError('Choose an audio file.');
@@ -143,7 +153,163 @@ async function run() {
 
 function scheduleRescore() {
   clearTimeout(rescoreTimer);
-  if (result) rescoreTimer = setTimeout(run, 250);
+  rescoreTimer = setTimeout(() => {
+    if (result && !isFolder(val('audio'))) runFile();
+    if (batch?.rows.some((r) => r.res)) scoreFolder(++batchSeq, !batch.running);  // a stopped run stays stopped
+  }, 250);
+}
+
+// ---- folder -------------------------------------------------------------------------------
+
+// Run every audio file of a folder, one after the other; RTTMs are paired by file name (see /api/folder).
+async function runFolder() {
+  const fields = { audio: val('audio'), ref: val('ref'), hyp: val('hyp') };
+  const checkpoint = val('checkpoint');
+  if (!checkpoint && !fields.hyp) return showError('Choose a checkpoint, or a prediction RTTM folder to inspect.');
+  const seq = ++batchSeq;
+  ++runSeq;  // drop a single-file run still in flight
+  setStatus('');
+  try {
+    const list = await api(`/api/folder?${new URLSearchParams(fields)}`);
+    if (seq !== batchSeq) return;
+    hideError();
+    batch = { ...list, fields, checkpoint, rows: list.files.map((f) => ({ ...f })) };
+    result = null;
+    $('#results').hidden = true;
+    scoreFolder(seq);
+  } catch (e) {
+    if (seq === batchSeq) showError(e);
+  }
+}
+
+// (Re-)score the files with the current settings; `onlyDone`: just the ones that have a result.
+// Model outputs are cached, so a re-score is quick.
+async function scoreFolder(seq, onlyDone = false) {
+  const b = batch;
+  const todo = onlyDone ? b.rows.filter((r) => r.res) : b.rows;
+  Object.assign(b, { running: true, stopped: false, done: 0, total: todo.length });
+  for (const row of todo) {
+    b.current = row;
+    renderFolder();
+    try {
+      if (b.hyp_dir && !row.hyp) throw new Error(`No ${basename(row.audio).replace(/\.[^.]*$/, '')}.rttm in the prediction folder`);
+      const res = await api('/api/run', {
+        audio: row.audio, checkpoint: b.checkpoint, ref_rttm: row.ref, hyp_rttm: row.hyp, ...getSettings(), brief: true,
+      });
+      if (seq !== batchSeq) return;
+      Object.assign(row, { res, error: '' });
+      if (res.model) showModel(res.model);
+    } catch (e) {
+      if (seq !== batchSeq) return;
+      Object.assign(row, { res: null, error: e.message });
+    }
+    b.done++;
+  }
+  Object.assign(b, { running: false, current: null });
+  renderFolder();
+}
+
+function stopFolder() {
+  ++batchSeq;
+  Object.assign(batch, { running: false, stopped: true, current: null });
+  renderFolder();
+}
+
+function renderFolder() {
+  const b = batch;
+  $('#folder').hidden = !b;
+  if (!b) return;
+  const n = b.rows.length;
+  const done = b.rows.filter((r) => r.res);
+  const scored = done.filter((r) => r.res.score);
+  const failed = b.rows.filter((r) => r.error).length;
+  $('#folder-count').textContent = `${n}`;
+  $('#folder-progress').innerHTML = `${b.running ? '<span class="spinner"></span>' : ''}${esc(b.path)}${
+    b.running ? ` · ${b.done} / ${b.total}` : b.stopped ? ` · stopped at ${b.done} / ${b.total}` : ''}`;
+  $('#folder-stop').hidden = !b.running;
+
+  // totals: DER over all scored speech (time-weighted), like NeMo / pyannote report it
+  const sum = (rows, f) => rows.reduce((acc, r) => acc + f(r.res), 0);
+  const speech = sum(scored, (res) => res.score.ref_speech);
+  const rate = (x) => (speech ? x / speech : null);
+  const model = done.filter((r) => r.res.source === 'model');
+  const cards = [card('Files', `${done.length} / ${n}`,
+    failed ? `${failed} failed` : `${scored.length} with reference`, failed ? 'warn' : '')];
+  if (scored.length) {
+    const [m, f, c] = ['miss_s', 'fa_s', 'conf_s'].map((k) => sum(scored, (res) => res.score[k]));
+    cards.push(card('DER', pct(rate(m + f + c)), `all files · ${speech.toFixed(0)} s scored speech`, 'main'));
+    cards.push(card('Missed', pct(rate(m)), secs(m), 'miss'));
+    cards.push(card('False alarm', pct(rate(f)), secs(f), 'fa'));
+    cards.push(card('Confusion', pct(rate(c)), secs(c), 'conf'));
+  }
+  cards.push(card('Audio', fmtTime(sum(done, (res) => res.duration), 0), `${done.length} files`));
+  if (model.length) {
+    const infer = sum(model, (res) => res.infer_time);
+    cards.push(card('Inference', `${infer.toFixed(1)} s`, `RTF ${(infer / sum(model, (res) => res.duration)).toFixed(4)}`));
+  }
+  $('#folder-metrics').innerHTML = cards.join('');
+
+  const hasRef = b.rows.some((r) => r.ref);
+  const order = b.rows.map((_, i) => i);
+  if (folderSort === 'der') order.sort((i, j) => (b.rows[j].res?.score?.der ?? -1) - (b.rows[i].res?.score?.der ?? -1));
+  const head = ['file', 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion'] : ['speech', 'overlap']), 'inference'];
+  const body = order.map((i) => {
+    const r = b.rows[i], res = r.res, s = res?.score;
+    const cls = i === b.active ? ' class="active"' : '';
+    const first = `<td title="${esc(r.audio)}">${esc(basename(r.audio))}</td>`;
+    if (r.error) return `<tr data-f="${i}"${cls}>${first}<td class="fail" colspan="${head.length - 1}">${esc(r.error)}</td></tr>`;
+    if (!res) {
+      const wait = r === b.current ? '<span class="spinner"></span>' : '';
+      return `<tr data-f="${i}"${cls}>${first}${'<td class="num">–</td>'.repeat(head.length - 2)}<td class="num">${wait}</td></tr>`;
+    }
+    const spk = res.ref
+      ? `<span class="${res.ref.speakers !== res.hyp.speakers ? 'warn' : ''}">${res.ref.speakers} → ${res.hyp.speakers}</span>`
+      : res.hyp.speakers;
+    const nums = hasRef
+      ? (s ? [pct(s.der), pct(s.miss), pct(s.fa), pct(s.conf)] : ['–', '–', '–', '–'])
+      : [secs(res.hyp.speech), pct(res.hyp.speech ? res.hyp.overlap / res.hyp.speech : null, 1)];
+    const infer = r === b.current ? '<span class="spinner"></span>'
+      : res.source === 'model' ? `${res.infer_time.toFixed(2)} s` : 'RTTM';
+    return `<tr data-f="${i}"${cls}>${first}<td class="num">${fmtTime(res.duration, 1)}</td><td class="num">${spk}</td>
+      ${nums.map((x) => `<td class="num">${x}</td>`).join('')}<td class="num">${infer}</td></tr>`;
+  });
+  $('#folder-table').innerHTML = `<table class="table">
+    <thead><tr>${head.map((h, k) => `<th${k ? ' class="num"' : ''}>${h}</th>`).join('')}</tr></thead>
+    <tbody>${body.join('')}</tbody></table>`;
+}
+
+// Open one file of the folder in the inspector below.
+async function openFolderFile(i) {
+  const r = batch.rows[i];
+  batch.active = i;
+  renderFolder();
+  for (const k of ['audio', 'ref', 'hyp']) setVal(k, r[k]);
+  lastAudio = r.audio;
+  save();
+  await runFile();
+  if (result?.audio === r.audio) $('#results').scrollIntoView({ behavior: 'smooth' });
+}
+
+function rerunFolder() {
+  for (const k of ['audio', 'ref', 'hyp']) setVal(k, batch.fields[k]);
+  lastAudio = batch.fields.audio;
+  save();
+  runFolder();
+}
+
+function downloadFolder(kind) {
+  const name = basename(batch.path) || 'folder';
+  if (kind === 'rttm') {
+    download(`${name}.rttm`, batch.rows.map((r) => r.res?.rttm || '').join(''), 'text/plain');
+    return;
+  }
+  const cols = ['file', 'duration_s', 'ref_speakers', 'pred_speakers', 'der', 'miss', 'fa', 'conf', 'ref_speech_s', 'infer_s', 'error'];
+  const cell = (x) => (x == null ? '' : /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : String(x));
+  const lines = batch.rows.map(({ audio, res, error }) => [
+    basename(audio), res?.duration, res?.ref?.speakers, res?.hyp.speakers, res?.score?.der, res?.score?.miss,
+    res?.score?.fa, res?.score?.conf, res?.score?.ref_speech, res?.source === 'model' ? res.infer_time : null, error,
+  ].map(cell).join(','));
+  download(`${name}.csv`, [cols.join(','), ...lines].join('\n') + '\n', 'text/csv');
 }
 
 // ---- results ------------------------------------------------------------------------------
@@ -214,8 +380,6 @@ function overlapRegions(segsBySpeaker) {
 
 function renderMetrics() {
   const res = result, s = res.score;
-  const card = (label, value, sub = '', cls = '') => `<div class="metric ${cls}"><div class="m-label">${label}</div>
-    <div class="m-value">${value}</div><div class="m-sub" title="${sub}">${sub}</div></div>`;
   const overlap = (st) => (st.speech ? st.overlap / st.speech : null);
   const cards = [];
   if (s) {
@@ -466,7 +630,10 @@ function setVal(field, value) { $(`#${field}`).value = value; }
 // Returns the pending lookup, so callers (Run, Enter, blur) all wait for the same one.
 function audioChanged() {
   const audio = val('audio');
-  if (audio && audio !== lastAudio) {
+  if (isFolder(audio)) {
+    lastAudio = audio;
+    save();
+  } else if (audio && audio !== lastAudio) {
     const prev = lastAudio;
     lastAudio = audio;
     pairing = (async () => {
@@ -570,6 +737,22 @@ function bindInputs() {
   $('#reset-settings').addEventListener('click', () => { setSettings({}); save(); scheduleRescore(); });
   $('#copy-yaml').addEventListener('click', copyYaml);
 
+  $('#folder-stop').addEventListener('click', stopFolder);
+  $('#folder-rerun').addEventListener('click', rerunFolder);
+  $('#folder-csv').addEventListener('click', () => downloadFolder('csv'));
+  $('#folder-rttm').addEventListener('click', () => downloadFolder('rttm'));
+  $('#folder-table').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-f]');
+    if (tr) openFolderFile(Number(tr.dataset.f));
+  });
+  for (const btn of document.querySelectorAll('[data-fsort]')) {
+    btn.addEventListener('click', () => {
+      folderSort = btn.dataset.fsort;
+      for (const b of document.querySelectorAll('[data-fsort]')) b.classList.toggle('on', b === btn);
+      renderFolder();
+    });
+  }
+
   // file browser dialog
   $('#br-list').addEventListener('click', (e) => {
     const li = e.target.closest('li');
@@ -580,6 +763,7 @@ function bindInputs() {
     if (e.key === 'Enter') { e.preventDefault(); listDir($('#br-path').value); }
   });
   $('#br-close').addEventListener('click', () => closePicker(null));
+  $('#br-use-dir').addEventListener('click', () => closePicker($('#br-path').value, true));
   $('#browser').addEventListener('close', () => { if (picker) closePicker(null); });
 }
 
@@ -587,6 +771,7 @@ function pickFile(field) {
   return new Promise((resolve) => {
     picker = { field, kind: FIELDS[field].kind, resolve };
     $('#br-title').textContent = `Select ${FIELDS[field].title}`;
+    $('#br-use-dir').hidden = field === 'checkpoint';
     $('#browser').showModal();
     listDir(val(field) || store.get(`dir.${field}`, '') || store.get('dir.audio', ''));
   });
@@ -612,11 +797,11 @@ async function listDir(path) {
   }
 }
 
-function closePicker(path) {
+function closePicker(path, isDir = false) {
   const p = picker;
   picker = null;
   if ($('#browser').open) $('#browser').close();
-  if (path && p) store.set(`dir.${p.field}`, path.replace(/[\\/][^\\/]*$/, ''));
+  if (path && p) store.set(`dir.${p.field}`, isDir ? path : path.replace(/[\\/][^\\/]*$/, ''));
   p?.resolve(path);
 }
 

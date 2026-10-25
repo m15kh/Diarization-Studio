@@ -31,9 +31,9 @@
         </div>
 
         <div class="field" data-drop="audio">
-          <label for="audio">Audio <small>server path, browse, upload, or drop a file</small></label>
+          <label for="audio">Audio <small>a file, or a folder to run every file in it · server path, browse, upload, or drop a file</small></label>
           <div class="row">
-            <input id="audio" placeholder="/path/to/audio.wav" spellcheck="false" autocomplete="off">
+            <input id="audio" placeholder="/path/to/audio.wav or /path/to/wav_folder" spellcheck="false" autocomplete="off">
             <button class="btn" data-browse="audio">Browse</button>
             <button class="btn" data-upload="audio">Upload</button>
             <button class="btn icon" id="prev-file" title="Previous file in this folder (runs it)">◀</button>
@@ -42,7 +42,7 @@
         </div>
 
         <div class="field" data-drop="ref">
-          <label for="ref">Reference RTTM <small>optional · ground truth, shows the errors</small></label>
+          <label for="ref">Reference RTTM <small>optional · ground truth, shows the errors · file or folder</small></label>
           <div class="row">
             <input id="ref" placeholder="found automatically next to the audio, or ../rttm/" spellcheck="false" autocomplete="off">
             <button class="btn" data-browse="ref">Browse</button>
@@ -51,7 +51,7 @@
         </div>
 
         <div class="field" data-drop="hyp">
-          <label for="hyp">Prediction RTTM <small>optional · inspect an existing output instead of running the model</small></label>
+          <label for="hyp">Prediction RTTM <small>optional · inspect an existing output instead of running the model · file or folder</small></label>
           <div class="row">
             <input id="hyp" placeholder="leave empty to run the checkpoint" spellcheck="false" autocomplete="off">
             <button class="btn" data-browse="hyp">Browse</button>
@@ -76,6 +76,25 @@
         </div>
       </section>
     </div>
+
+    <section id="folder" class="block" hidden>
+      <span class="block-label">Folder <span id="folder-count" class="count"></span></span>
+      <div class="sorter" id="folder-sort">sort by
+        <button class="btn small on" data-fsort="name">name</button>
+        <button class="btn small" data-fsort="der" title="Worst first">DER</button>
+      </div>
+      <div class="toolbar">
+        <span id="folder-progress" class="muted"></span>
+        <span class="grow"></span>
+        <button id="folder-stop" class="btn">Stop</button>
+        <button id="folder-rerun" class="btn" title="Run every file again, e.g. after changing the checkpoint">Run folder again</button>
+        <button id="folder-csv" class="btn" title="One row per file">CSV</button>
+        <button id="folder-rttm" class="btn" title="All predictions in one RTTM file">Download RTTM</button>
+      </div>
+      <div id="folder-metrics" class="metrics"></div>
+      <div id="folder-table" class="scroll"></div>
+      <p class="hint">Click a file to inspect it below. Post-processing changes re-score the whole folder.</p>
+    </section>
 
     <section id="results" hidden>
       <div id="warnings"></div>
@@ -136,7 +155,10 @@
       <strong id="br-title">Select file</strong>
       <button class="btn icon" id="br-close" title="Close">✕</button>
     </div>
-    <input id="br-path" spellcheck="false" autocomplete="off" title="Type a folder and press Enter">
+    <div class="row br-row">
+      <input id="br-path" spellcheck="false" autocomplete="off" title="Type a folder and press Enter">
+      <button class="btn" id="br-use-dir" title="Use the whole folder">Use this folder</button>
+    </div>
     <ul id="br-list"></ul>
   </dialog>
   <input type="file" id="file-input" hidden>

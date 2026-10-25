@@ -33,7 +33,7 @@ UPLOAD_DIR = Path(tempfile.gettempdir()) / "diar_inspector_uploads"
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
 EXTENSIONS = {"checkpoint": {".nemo", ".ckpt"}, "audio": AUDIO_EXTS, "rttm": {".rttm"}}
 PP_KEYS = {"onset", "offset", "pad_onset", "pad_offset", "min_duration_on", "min_duration_off"}
-CACHE_SIZE = 32  # model outputs kept in memory, so changing thresholds never re-runs the model
+CACHE_SIZE = 256  # model outputs kept in memory, so changing thresholds never re-runs the model
 
 app = FastAPI(title="Diarization Inspector")
 state = {"device": "auto", "model": None}
@@ -59,6 +59,7 @@ class RunRequest(BaseModel):
     min_duration_off: float = 0.0
     collar: float = 0.25
     ignore_overlap: bool = False
+    brief: bool = False  # only the numbers (folder runs): no probabilities, segments or error lanes
 
 
 @app.get("/api/model")
@@ -136,7 +137,49 @@ def run(req: RunRequest):
             out["warnings"].append(f"Reference goes to {late:.2f} s but the audio is only {duration:.2f} s long.")
 
     out["rttm"] = scoring.write_rttm(file_id, hyp_names, hyp_segs)
+    if req.brief:
+        out.pop("probs", None)
+        for key in ("hyp", "ref"):
+            out.get(key, {}).pop("segments", None)
+        if "score" in out:
+            out["score"] = {k: v for k, v in out["score"].items() if k not in ("lanes", "regions", "speakers")}
     return out
+
+
+@app.get("/api/folder")
+def folder(audio: str, ref: str = "", hyp: str = ""):
+    """The audio files of a folder, each paired with <name>.rttm from the `ref` / `hyp` folders.
+
+    A file path for `ref` / `hyp` means its folder. An empty reference is looked up next to
+    each audio file (same folder, ../rttm, ./rttm), like /api/pair does.
+    """
+    audio_dir = Path(audio).expanduser().absolute()
+    if not audio_dir.is_dir():
+        raise HTTPException(400, f"Audio folder not found: {audio}")
+    files = sorted((f for f in audio_dir.iterdir() if f.suffix.lower() in AUDIO_EXTS and f.is_file()),
+                   key=lambda f: scoring.natural_key(f.name))
+    if not files:
+        raise HTTPException(400, f"No audio files in {audio_dir}")
+
+    def rttm_dir(path: str, what: str) -> Path | None:
+        if not path:
+            return None
+        d = Path(path).expanduser().absolute()
+        d = d.parent if d.is_file() else d
+        if not d.is_dir():
+            raise HTTPException(400, f"{what} folder not found: {path}")
+        return d
+
+    ref_dir, hyp_dir = rttm_dir(ref, "Reference RTTM"), rttm_dir(hyp, "Prediction RTTM")
+    find = lambda d, stem: str(d / f"{stem}.rttm") if (d / f"{stem}.rttm").is_file() else ""
+    return {
+        "path": str(audio_dir),
+        "ref_dir": str(ref_dir or ""),
+        "hyp_dir": str(hyp_dir or ""),
+        "files": [{"audio": str(f),
+                   "ref": find(ref_dir, f.stem) if ref_dir else pair(str(f))["ref"],
+                   "hyp": find(hyp_dir, f.stem) if hyp_dir else ""} for f in files],
+    }
 
 
 @app.get("/api/browse")
@@ -181,6 +224,7 @@ def pair(audio: str, prev_audio: str = "", ref: str = "", hyp: str = ""):
 
     An RTTM that was paired with the previous audio (same file name) follows the new audio;
     an empty reference is looked up next to the audio (same folder, ../rttm, ./rttm);
+    an RTTM folder gives the file in it named like the audio;
     anything else the user picked by hand is kept.
     """
     stem = Path(audio).stem
@@ -188,9 +232,12 @@ def pair(audio: str, prev_audio: str = "", ref: str = "", hyp: str = ""):
     audio_dir = Path(audio).expanduser().parent
 
     def follow(current: str, fallback_dirs: list[Path]) -> str:
-        if current and Path(current).stem != prev_stem:
+        if current and Path(current).expanduser().is_dir():  # an RTTM folder: the file named like the audio
+            dirs = [Path(current).expanduser()] + fallback_dirs
+        elif current and Path(current).stem != prev_stem:
             return current
-        dirs = ([Path(current).expanduser().parent] if current else []) + fallback_dirs
+        else:
+            dirs = ([Path(current).expanduser().parent] if current else []) + fallback_dirs
         return next((str(d / f"{stem}.rttm") for d in dirs if (d / f"{stem}.rttm").is_file()), "")
 
     return {
@@ -289,15 +336,15 @@ def main():
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:N")
     parser.add_argument("--checkpoint", help="checkpoint (.nemo / .ckpt) to load at startup")
-    parser.add_argument("--audio", help="audio file to show in the UI (runs when the page opens)")
+    parser.add_argument("--audio", help="audio file or folder to show in the UI (runs when the page opens)")
     parser.add_argument("--rttm", "--ref-rttm", dest="ref_rttm",
-                        help="reference RTTM (default: found next to the audio or in ../rttm/)")
-    parser.add_argument("--hyp-rttm", help="prediction RTTM to inspect instead of running the checkpoint")
+                        help="reference RTTM file or folder (default: found next to the audio or in ../rttm/)")
+    parser.add_argument("--hyp-rttm", help="prediction RTTM file or folder to inspect instead of running the checkpoint")
     args = parser.parse_args()
 
     def cli_path(path: str, what: str) -> str:
         full = os.path.abspath(os.path.expanduser(path))
-        if not os.path.isfile(full):
+        if not (os.path.isfile(full) or what != "Checkpoint" and os.path.isdir(full)):
             parser.error(f"{what} not found: {path}")
         return full
 
@@ -308,7 +355,7 @@ def main():
         if path:
             paths[key] = cli_path(path, what)
             print(f"{what + ':':17}{paths[key]}")
-    if "audio" in paths and "ref" not in paths:
+    if "audio" in paths and "ref" not in paths and os.path.isfile(paths["audio"]):  # a folder pairs per file
         paths["ref"] = pair(paths["audio"])["ref"]
         print(f"{'Reference RTTM:':17}{paths['ref'] or '(none found next to the audio)'}")
 

@@ -15,9 +15,9 @@ python3 backend/server.py                http://127.0.0.1:7860
 | option | |
 |---|---|
 | `--checkpoint PATH` | load a `.nemo` / `.ckpt` at startup |
-| `--audio PATH` | audio file to open (`.wav`, `.flac`, ...) |
-| `--rttm PATH` | reference RTTM (also `--ref-rttm`). Default: found next to the audio or in `../rttm/` |
-| `--hyp-rttm PATH` | prediction RTTM to inspect instead of running the checkpoint |
+| `--audio PATH` | audio file to open (`.wav`, `.flac`, ...), or a folder to run every audio file in it |
+| `--rttm PATH` | reference RTTM file or folder (also `--ref-rttm`). Default: found next to the audio or in `../rttm/` |
+| `--hyp-rttm PATH` | prediction RTTM file or folder to inspect instead of running the checkpoint |
 | `--device auto` | `auto`, `cpu`, `cuda`, `cuda:1`, ... |
 | `--port 7860` | |
 | `--host 127.0.0.1` | `0.0.0.0` makes it reachable from other machines; the UI can browse the server's files, so only do that on a trusted network |
@@ -43,6 +43,12 @@ python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo \
 # no model: inspect an existing prediction (pyannote, DiariZen, an older run, ...)
 python3 backend/server.py --audio /data/test/wav/meeting_01.wav --hyp-rttm /runs/pyannote/meeting_01.rttm
 
+# a whole folder: every wav runs, scored against the RTTM with the same name in the RTTM folder
+python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo --audio /data/test/wav --rttm /data/test/rttm
+
+# a folder of existing predictions against the references
+python3 backend/server.py --audio /data/test/wav --rttm /data/test/rttm --hyp-rttm /runs/pyannote
+
 # only the checkpoint: the audio fields keep what you used last time
 python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo
 ```
@@ -56,8 +62,22 @@ python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo
 
 1. **Checkpoint**: a path on the server (Browse lists `.nemo` / `.ckpt`). The model stays loaded. The number of speaker outputs (2, 4, 8, ...) is read from the checkpoint.
 2. **Audio**: a server path, Browse, Upload, or drag and drop. ◀ ▶ step through the files of the folder and run them.
+   A **folder** runs every audio file in it (Browse → **Use this folder**, see [Folders](#folders)).
 3. **Reference RTTM** (optional): ground truth. It is found automatically next to the audio or in `../rttm/` (the `wav/` + `rttm/` layout of the datasets).
 4. **Prediction RTTM** (optional): inspect any existing output (pyannote, DiariZen, older runs, ...) instead of running the model.
+
+### Folders
+
+Put a folder in **Audio** (and optionally in **Reference RTTM** / **Prediction RTTM**) and press Run, or give the folders in the terminal:
+
+- Each audio file is paired with the RTTM of the same name: `wav/meeting_01.wav` ↔ `rttm/meeting_01.rttm`.
+  An RTTM *file* in a folder field means its folder. With the reference field empty, it is looked up next to each audio file, in `../rttm/` or in `./rttm/`.
+- The files run one after the other. The **Folder** table fills in as they finish: length, speakers (reference → predicted), DER, missed, false alarm and confusion per file. Files without a reference show `–`.
+- **Totals** at the top: DER over all files, computed from the summed error and speech time of every file (the way NeMo and pyannote report a total). It is not the average of the per-file DERs.
+- **Sort by DER** puts the worst files first. **Click a file** to open it in the full inspector below (timeline, errors, speakers). ◀ ▶ then step through the folder.
+- Changing post-processing, the collar or "ignore overlap" re-scores the whole folder. Model outputs are cached, so the totals update in seconds.
+- **Run folder again** reruns every file, for example after loading another checkpoint. **Stop** stops after the current file.
+- **CSV**: one row per file. **Download RTTM**: all predictions in one RTTM file.
 
 The post-processing fields use NeMo's `PostProcessingParams` names. Changing them, the collar or "ignore overlap" re-scores instantly: the model output is cached, so only post-processing and scoring re-run. **Copy YAML** gives a `postprocessing_yaml` for `e2e_diarize_speech.py`.
 
@@ -99,4 +119,4 @@ frontend/            index.html, app.js (UI), timeline.js (canvas timeline), sty
 ## Notes
 
 - Inference is offline (whole file in one pass). That is fine for minutes of audio; hours may run out of GPU memory.
-- The last 32 model outputs are cached in memory. Nothing is written to disk except uploads (`/tmp/diar_inspector_uploads`).
+- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except uploads (`/tmp/diar_inspector_uploads`).
