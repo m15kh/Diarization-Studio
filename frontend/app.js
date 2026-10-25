@@ -58,7 +58,7 @@ restore();
 bindInputs();
 bindResults();
 bindKeys();
-initModel();
+initServer();
 
 // ---- server -------------------------------------------------------------------------------
 
@@ -75,14 +75,34 @@ async function api(url, body) {
   return data;
 }
 
-async function initModel() {
+async function initServer() {
   try {
-    const info = await api('/api/model');
+    const [info, startup] = await Promise.all([api('/api/model'), api('/api/startup')]);
+    // paths given on the server command line: applied once per server start,
+    // so reloading the page keeps what was changed in the UI since
+    const paths = startup.launch !== store.get('launch') ? startup.paths : {};
+    store.set('launch', startup.launch);
+    applyPaths(paths);
     if (info) {
       if (!val('checkpoint')) setVal('checkpoint', info.path);
       showModel(info);
     }
+    if (paths.audio && (val('checkpoint') || val('hyp'))) run();
+    else if (Object.keys(paths).length) setStatus('Paths set from the terminal');
   } catch { /* server not reachable yet */ }
+}
+
+function applyPaths(paths) {
+  if (!Object.keys(paths).length) return;
+  if (paths.audio) {
+    // a new audio file: RTTMs not given in the terminal must not stay from the previous file
+    for (const k of ['audio', 'ref', 'hyp']) setVal(k, paths[k] || '');
+    lastAudio = paths.audio;
+  } else {
+    for (const k of ['ref', 'hyp']) if (paths[k]) setVal(k, paths[k]);
+  }
+  if (paths.checkpoint) setVal('checkpoint', paths.checkpoint);
+  save();
 }
 
 async function loadModel() {

@@ -1,6 +1,7 @@
 """Diarization Inspector: FastAPI backend that also serves the web UI in ../frontend.
 
-    python backend/server.py [--host 127.0.0.1] [--port 7860] [--device auto] [--checkpoint model.nemo]
+    python backend/server.py [--host 127.0.0.1] [--port 7860] [--device auto]
+                             [--checkpoint model.nemo] [--audio a.wav] [--rttm a.rttm] [--hyp-rttm pred.rttm]
 
 No database: the loaded model and recent model outputs live in memory only.
 """
@@ -36,6 +37,7 @@ CACHE_SIZE = 32  # model outputs kept in memory, so changing thresholds never re
 
 app = FastAPI(title="Diarization Inspector")
 state = {"device": "auto", "model": None}
+startup = {"launch": uuid.uuid4().hex[:8], "paths": {}}  # paths given on the command line, filled into the UI
 lock = threading.Lock()  # one model, one inference at a time
 cache: OrderedDict = OrderedDict()
 
@@ -69,6 +71,12 @@ def load_model(req: LoadRequest):
     path = existing(req.path, "Checkpoint")
     with lock:
         return get_model(path).info()
+
+
+@app.get("/api/startup")
+def startup_paths():
+    """Paths from the command line. `launch` changes on every server start, so the UI applies them once."""
+    return startup
 
 
 @app.post("/api/run")
@@ -281,12 +289,33 @@ def main():
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:N")
     parser.add_argument("--checkpoint", help="checkpoint (.nemo / .ckpt) to load at startup")
+    parser.add_argument("--audio", help="audio file to show in the UI (runs when the page opens)")
+    parser.add_argument("--rttm", "--ref-rttm", dest="ref_rttm",
+                        help="reference RTTM (default: found next to the audio or in ../rttm/)")
+    parser.add_argument("--hyp-rttm", help="prediction RTTM to inspect instead of running the checkpoint")
     args = parser.parse_args()
+
+    def cli_path(path: str, what: str) -> str:
+        full = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isfile(full):
+            parser.error(f"{what} not found: {path}")
+        return full
+
+    # keys are the UI field names
+    paths = startup["paths"]
+    for key, path, what in [("checkpoint", args.checkpoint, "Checkpoint"), ("audio", args.audio, "Audio"),
+                            ("ref", args.ref_rttm, "Reference RTTM"), ("hyp", args.hyp_rttm, "Prediction RTTM")]:
+        if path:
+            paths[key] = cli_path(path, what)
+            print(f"{what + ':':17}{paths[key]}")
+    if "audio" in paths and "ref" not in paths:
+        paths["ref"] = pair(paths["audio"])["ref"]
+        print(f"{'Reference RTTM:':17}{paths['ref'] or '(none found next to the audio)'}")
 
     state["device"] = args.device
     if args.checkpoint:
         print(f"Loading {args.checkpoint} ...")
-        state["model"] = get_model(existing(args.checkpoint, "Checkpoint"))
+        state["model"] = get_model(paths["checkpoint"])
 
     import uvicorn
 

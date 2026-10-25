@@ -15,6 +15,9 @@ python3 backend/server.py                http://127.0.0.1:7860
 | option | |
 |---|---|
 | `--checkpoint PATH` | load a `.nemo` / `.ckpt` at startup |
+| `--audio PATH` | audio file to open (`.wav`, `.flac`, ...) |
+| `--rttm PATH` | reference RTTM (also `--ref-rttm`). Default: found next to the audio or in `../rttm/` |
+| `--hyp-rttm PATH` | prediction RTTM to inspect instead of running the checkpoint |
 | `--device auto` | `auto`, `cpu`, `cuda`, `cuda:1`, ... |
 | `--port 7860` | |
 | `--host 127.0.0.1` | `0.0.0.0` makes it reachable from other machines; the UI can browse the server's files, so only do that on a trusted network |
@@ -24,6 +27,30 @@ Server on a remote GPU machine: run it there and tunnel the port, then open http
 ```bash
 ssh -L 7860:localhost:7860 user@gpu-server
 ```
+
+### Set the inputs from the terminal
+
+Everything can also be chosen in the UI. The paths given on the command line are filled into the UI fields when the page opens:
+
+```bash
+# checkpoint + audio: the model loads at startup and the file runs as soon as the page opens
+python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo --audio /data/test/wav/meeting_01.wav
+
+# with an explicit reference RTTM
+python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo \
+    --audio /data/test/wav/meeting_01.wav --rttm /data/test/rttm/meeting_01.rttm
+
+# no model: inspect an existing prediction (pyannote, DiariZen, an older run, ...)
+python3 backend/server.py --audio /data/test/wav/meeting_01.wav --hyp-rttm /runs/pyannote/meeting_01.rttm
+
+# only the checkpoint: the audio fields keep what you used last time
+python3 backend/server.py --checkpoint /models/sortformer_8spk.nemo
+```
+
+- Paths can be relative to the folder you start the server in, or start with `~`. A path that does not exist stops the server with an error.
+- Without `--rttm`, the reference is looked up the same way as in the UI: `meeting_01.rttm` next to the audio, in `../rttm/` or in `./rttm/`. The terminal shows which one was found.
+- With `--audio`, the RTTM fields only hold what was given or found for that file. RTTMs left over from another file are cleared.
+- The page opens with these paths once per server start. If you change a field in the UI and reload the page, your change stays. Restart the server to apply the terminal paths again.
 
 ## Use
 
