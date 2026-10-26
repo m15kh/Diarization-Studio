@@ -46,6 +46,9 @@ const timeline = new Timeline({
 
 let result = null;      // last /api/run response
 let view = null;        // colors and per-speaker segments derived from `result`
+let laneSize = store.get('laneSize', '1.6');     // height multiplier of the speaker / error lanes
+let viewMode = store.get('viewMode', 'simple');  // timeline layout: 'simple' or 'detailed'
+const hiddenSpeakers = new Set(store.get('hiddenSpeakers', []));  // speaker keys ('ref:name' / 'hyp:name') not drawn
 let loadedAudio = '';   // audio path currently in the player
 let lastAudio = '';     // audio path the RTTM fields were last paired with
 let pairing = Promise.resolve();
@@ -55,6 +58,7 @@ let batch = null;       // folder run: { path, ref_dir, hyp_dir, fields, checkpo
 let batchSeq = 0;
 let folderSort = 'name';
 let errorSort = 'time';
+const errorTypes = new Set(store.get('errorTypes', ['miss', 'fa', 'conf']));  // error types the list and ◀ ▶ show
 let picker = null;
 let rescoreTimer = null;
 let statusTimer = null;
@@ -241,6 +245,8 @@ function renderFolder() {
     cards.push(card('Missed', pct(rate(m)), secs(m), 'miss'));
     cards.push(card('False alarm', pct(rate(f)), secs(f), 'fa'));
     cards.push(card('Confusion', pct(rate(c)), secs(c), 'conf'));
+    const nj = sum(scored, (res) => res.score.jer_speakers ?? 0);
+    cards.push(card('JER', pct(nj ? sum(scored, (res) => res.score.jer_sum ?? 0) / nj : null), `mean over ${nj} reference speakers`));
   }
   cards.push(card('Audio', fmtTime(sum(done, (res) => res.duration), 0), `${done.length} files`));
   if (model.length) {
@@ -252,7 +258,7 @@ function renderFolder() {
   const hasRef = b.rows.some((r) => r.ref);
   const order = b.rows.map((_, i) => i);
   if (folderSort === 'der') order.sort((i, j) => (b.rows[j].res?.score?.der ?? -1) - (b.rows[i].res?.score?.der ?? -1));
-  const head = ['file', 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion'] : ['speech', 'overlap']), 'inference'];
+  const head = ['file', 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion', 'JER'] : ['speech', 'overlap']), 'inference'];
   const body = order.map((i) => {
     const r = b.rows[i], res = r.res, s = res?.score;
     const cls = i === b.active ? ' class="active"' : '';
@@ -266,7 +272,7 @@ function renderFolder() {
       ? `<span class="${res.ref.speakers !== res.hyp.speakers ? 'warn' : ''}">${res.ref.speakers} → ${res.hyp.speakers}</span>`
       : res.hyp.speakers;
     const nums = hasRef
-      ? (s ? [pct(s.der), pct(s.miss), pct(s.fa), pct(s.conf)] : ['–', '–', '–', '–'])
+      ? (s ? [pct(s.der), pct(s.miss), pct(s.fa), pct(s.conf), pct(s.jer)] : ['–', '–', '–', '–', '–'])
       : [secs(res.hyp.speech), pct(res.hyp.speech ? res.hyp.overlap / res.hyp.speech : null, 1)];
     const infer = r === b.current ? '<span class="spinner"></span>'
       : res.source === 'model' ? `${res.infer_time.toFixed(2)} s` : 'RTTM';
@@ -303,11 +309,11 @@ function downloadFolder(kind) {
     download(`${name}.rttm`, batch.rows.map((r) => r.res?.rttm || '').join(''), 'text/plain');
     return;
   }
-  const cols = ['file', 'duration_s', 'ref_speakers', 'pred_speakers', 'der', 'miss', 'fa', 'conf', 'ref_speech_s', 'infer_s', 'error'];
+  const cols = ['file', 'duration_s', 'ref_speakers', 'pred_speakers', 'der', 'miss', 'fa', 'conf', 'jer', 'ref_speech_s', 'infer_s', 'error'];
   const cell = (x) => (x == null ? '' : /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : String(x));
   const lines = batch.rows.map(({ audio, res, error }) => [
     basename(audio), res?.duration, res?.ref?.speakers, res?.hyp.speakers, res?.score?.der, res?.score?.miss,
-    res?.score?.fa, res?.score?.conf, res?.score?.ref_speech, res?.source === 'model' ? res.infer_time : null, error,
+    res?.score?.fa, res?.score?.conf, res?.score?.jer, res?.score?.ref_speech, res?.source === 'model' ? res.infer_time : null, error,
   ].map(cell).join(','));
   download(`${name}.csv`, [cols.join(','), ...lines].join('\n') + '\n', 'text/csv');
 }
@@ -387,6 +393,7 @@ function renderMetrics() {
     cards.push(card('Missed', pct(s.miss), secs(s.miss_s), 'miss'));
     cards.push(card('False alarm', pct(s.fa), secs(s.fa_s), 'fa'));
     cards.push(card('Confusion', pct(s.conf), secs(s.conf_s), 'conf'));
+    cards.push(card('JER', pct(s.jer), `mean over ${s.jer_speakers} reference speakers`));
     const nr = res.ref.speakers, nh = res.hyp.speakers;
     cards.push(card('Speakers', `${nr} → ${nh}`, 'reference → predicted', nr !== nh ? 'warn' : ''));
     const [ro, ho] = [overlap(res.ref), overlap(res.hyp)].map((x) => (x == null ? '–' : (x * 100).toFixed(1)));
@@ -411,9 +418,15 @@ function renderMetrics() {
 function renderTimeline(keepView) {
   const res = result, v = view;
   const showAll = $('#show-all').checked;
+  const showDiff = $('#show-diff').checked && res.score;
   const { onset, offset } = getSettings();
   const rows = [];
   let hidden = 0;
+  const map = res.score?.hyp_to_ref || [];
+  // a predicted speaker mapped to a reference speaker is shown / hidden together with it
+  const hypKey = (h) => (map[h] != null ? `ref:${res.ref.names[map[h]]}` : `hyp:${res.hyp.names[h]}`);
+  const shown = (key) => !hiddenSpeakers.has(key);
+  const chips = [];
   const hypRow = (h, label, band) => ({
     kind: 'hyp', label, band, color: v.hypColor[h], segs: v.hypSegs[h],
     probs: v.probs?.[h], step: res.frame_step, onset, offset, muted: !v.hypSegs[h].length,
@@ -423,27 +436,38 @@ function renderTimeline(keepView) {
   rows.push({ kind: 'header', label: 'Diarization · who speaks when · highlighted: 2+ speakers at once' });
   res.hyp.names.forEach((name, h) => {
     if (!(showAll || v.hypVisible[h] || res.score?.hyp_to_ref[h] != null)) return;
+    if (!res.score) chips.push({ key: hypKey(h), label: name, color: v.hypColor[h] });
+    if (!shown(hypKey(h))) return;
     rows.push({ kind: 'seg', label: name, color: v.hypColor[h], segs: v.hypSegs[h], highlight: v.hypOverlap,
                 muted: !v.hypSegs[h].length });
   });
 
   if (res.score) {
-    const map = res.score.hyp_to_ref;
-    rows.push({ kind: 'header', label: 'Speakers · reference ▸ prediction' });
+    const lanes = res.score.lanes;
+    const unscored = mergeSegs(lanes.unscored);
+    // per speaker: reference time the prediction misses, and predicted time the reference does not have
+    const diff = (refSegs, hypSegs) => (showDiff ? {
+      miss: subtractSegs(subtractSegs(mergeSegs(refSegs), mergeSegs(hypSegs)), unscored),
+      extra: subtractSegs(subtractSegs(mergeSegs(hypSegs), mergeSegs(refSegs)), unscored),
+    } : null);
+    rows.push({ kind: 'header', label: `Speakers · reference ▸ prediction${showDiff ? ' · red: missed · amber: extra' : ''}` });
     res.ref.names.forEach((name, r) => {
+      chips.push({ key: `ref:${name}`, label: name, color: v.refColor[r] });
+      if (!shown(`ref:${name}`)) return;
       const band = r % 2 === 1;
-      rows.push({ kind: 'ref', label: name, color: v.refColor[r], segs: v.refSegs[r], band });
+      rows.push({ kind: 'ref', label: name, tag: 'ref', color: v.refColor[r], segs: v.refSegs[r], band });
       const h = map.indexOf(r);
       rows.push(h >= 0
-        ? hypRow(h, `↳ ${res.hyp.names[h]}`, band)
-        : { kind: 'hyp', label: '↳ not detected', color: v.refColor[r], segs: [], band, muted: true });
+        ? { ...hypRow(h, res.hyp.names[h], band), tag: 'pred', diff: diff(v.refSegs[r], v.hypSegs[h]) }
+        : { kind: 'hyp', label: 'not detected', tag: 'pred', color: v.refColor[r], segs: [], band, muted: true,
+            diff: diff(v.refSegs[r], []) });
     });
     res.hyp.names.forEach((name, h) => {
       if (map[h] != null) return;
-      if (showAll || v.hypVisible[h]) rows.push(hypRow(h, `${name} (extra)`, false));
-      else hidden++;
+      if (!(showAll || v.hypVisible[h])) { hidden++; return; }
+      chips.push({ key: hypKey(h), label: `${name} (extra)`, color: v.hypColor[h] });
+      if (shown(hypKey(h))) rows.push({ ...hypRow(h, `${name} (extra)`, false), tag: 'pred', diff: diff([], v.hypSegs[h]) });
     });
-    const lanes = res.score.lanes;
     const scoring = `collar ±${res.score.collar} s${res.score.ignore_overlap ? ' · overlap not scored' : ''}`;
     rows.push({ kind: 'header', label: `Errors · ${scoring}` });
     rows.push({ kind: 'err', label: 'missed', colorVar: '--miss', segs: lanes.miss, unscored: lanes.unscored });
@@ -453,17 +477,116 @@ function renderTimeline(keepView) {
   } else if (res.probs) {  // without probabilities this would repeat the diarization lanes
     rows.push({ kind: 'header', label: 'Speaker probability · dashed: onset / offset' });
     res.hyp.names.forEach((name, h) => {
-      if (showAll || v.hypVisible[h]) rows.push(hypRow(h, name, h % 2 === 1));
-      else hidden++;
+      if (!(showAll || v.hypVisible[h])) hidden++;
+      else if (shown(hypKey(h))) rows.push(hypRow(h, name, h % 2 === 1));
     });
   }
+  // with fewer than two speakers there is no filter to undo a hidden one with, so show it
+  if (chips.length < 2 && chips.some((c) => hiddenSpeakers.has(c.key))) {
+    return setHiddenSpeakers([...hiddenSpeakers].filter((k) => !chips.some((c) => c.key === k)));
+  }
+  if (viewMode === 'simple') rows.splice(0, rows.length, ...simpleRows(shown, hypKey));
+  renderSpeakerFilter(chips);
   $('#show-all-wrap').hidden = !res.probs;
+  $('#show-diff-wrap').hidden = !res.score;
+  for (const b of document.querySelectorAll('[data-view]')) b.classList.toggle('on', b.dataset.view === viewMode);
   $('#show-all-label').textContent = `silent outputs${hidden ? ` (${hidden} hidden)` : ''}`;
   $('#prev-err').disabled = $('#next-err').disabled = !res.score?.regions.length;
   timeline.setData({
-    duration: res.duration, rows, keepView,
+    duration: res.duration, rows, keepView, laneScale: parseFloat(laneSize),
     marks: res.score ? res.score.regions.map((g) => [g.start, g.end]) : [],
   });
+}
+
+// The simple layout: one compact lane per speaker with the reference on top and its matched prediction right
+// below (same color; red / amber where they differ), then one error lane.
+function simpleRows(shown, hypKey) {
+  const res = result, v = view;
+  const showAll = $('#show-all').checked;
+  const visible = (h) => (showAll || v.hypVisible[h]) && shown(hypKey(h));
+  if (!res.score) {
+    const tracks = [];
+    res.hyp.names.forEach((_, h) => { if (visible(h)) tracks.push({ color: v.hypColor[h], segs: v.hypSegs[h] }); });
+    return [{ kind: 'header', label: 'Prediction · one track per speaker' },
+            { kind: 'stack', label: 'prediction', tracks, h: Math.max(26, tracks.length * 8 + 6) }];
+  }
+  const map = res.score.hyp_to_ref, lanes = res.score.lanes;
+  const unscored = mergeSegs(lanes.unscored);
+  const diff = (refSegs, hypSegs) => ($('#show-diff').checked ? {
+    miss: subtractSegs(subtractSegs(mergeSegs(refSegs), mergeSegs(hypSegs)), unscored),
+    extra: subtractSegs(subtractSegs(mergeSegs(hypSegs), mergeSegs(refSegs)), unscored),
+  } : null);
+  const pair = (refName, hypName, color, refSegs, hypSegs, band) => ({
+    kind: 'stack', label: refName, color, band, h: 36, diff: diff(refSegs, hypSegs),
+    tracks: [{ color, segs: refSegs, label: refName, tag: 'ref', bgVar: '--track-ref' },
+             { color, segs: hypSegs, label: hypName, tag: 'pred', bgVar: '--track-pred' }],
+  });
+  const rows = [{ kind: 'header', label: 'Per speaker · REF: reference (top) · PRED: prediction (bottom, darker) · red: missed · amber: extra' }];
+  res.ref.names.forEach((name, r) => {
+    if (!shown(`ref:${name}`)) return;
+    const h = map.indexOf(r);
+    rows.push(pair(name, h >= 0 ? res.hyp.names[h] : 'not detected', v.refColor[r], v.refSegs[r],
+                   h >= 0 ? v.hypSegs[h] : [], r % 2 === 1));
+  });
+  res.hyp.names.forEach((name, h) => {  // predicted speakers with no reference speaker
+    if (map[h] == null && visible(h)) rows.push(pair('— no reference', `${name} (extra)`, v.hypColor[h], [], v.hypSegs[h], false));
+  });
+  const scoring = `collar ±${res.score.collar} s${res.score.ignore_overlap ? ' · overlap not scored' : ''}`;
+  rows.push(
+    { kind: 'header', label: `Errors · red: missed · amber: false alarm · purple: confusion · ${scoring}` },
+    { kind: 'stack', label: 'errors', h: 30, unscored: lanes.unscored,
+      tracks: [{ colorVar: '--miss', segs: lanes.miss }, { colorVar: '--fa', segs: lanes.fa }, { colorVar: '--conf', segs: lanes.conf }] },
+  );
+  return rows;
+}
+
+// One toggle per speaker above the timeline; a hidden speaker's lanes are left out of every section.
+function renderSpeakerFilter(chips) {
+  const box = $('#speaker-filter');
+  box.hidden = chips.length < 2;
+  const keys = JSON.stringify(chips.map((c) => c.key));
+  if (box.dataset.keys === keys) {  // same speakers: update in place, so a double-click lands on the same button
+    for (const b of box.querySelectorAll('[data-speaker]')) b.classList.toggle('on', !hiddenSpeakers.has(b.dataset.speaker));
+    return;
+  }
+  box.innerHTML = `<span>Speakers</span>${chips.map((c) => `
+    <button class="btn small chip${hiddenSpeakers.has(c.key) ? '' : ' on'}" data-speaker="${esc(c.key)}"
+      title="Show / hide this speaker (click) · show only this speaker (double-click)"><i style="background:${c.color}"></i>${esc(c.label)}</button>`).join('')}
+    <button class="btn small" data-speaker-all title="Show every speaker">all</button>`;
+  box.dataset.keys = keys;
+}
+
+function setHiddenSpeakers(keys) {
+  hiddenSpeakers.clear();
+  for (const k of keys) hiddenSpeakers.add(k);
+  store.set('hiddenSpeakers', [...hiddenSpeakers]);
+  renderTimeline(true);
+}
+
+// Merge [[start, end], ...] into sorted, non-overlapping segments.
+function mergeSegs(segs) {
+  const out = [];
+  for (const [s, e] of [...segs].sort((x, y) => x[0] - y[0])) {
+    if (out.length && s <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], e);
+    else out.push([s, e]);
+  }
+  return out;
+}
+
+// Parts of `a` not covered by `b`; both sorted and non-overlapping.
+function subtractSegs(a, b) {
+  const out = [];
+  let j = 0;
+  for (let [s, e] of a) {
+    while (j < b.length && b[j][1] <= s) j++;
+    for (let k = j; k < b.length && b[k][0] < e; k++) {
+      if (b[k][0] > s) out.push([s, b[k][0]]);
+      s = Math.max(s, b[k][1]);
+      if (s >= e) break;
+    }
+    if (s < e) out.push([s, e]);
+  }
+  return out;
 }
 
 function renderErrors() {
@@ -479,7 +602,12 @@ function renderErrors() {
     box.innerHTML = '<p class="empty">No errors in the scored region.</p>';
     return;
   }
-  const regions = s.regions.map((g, i) => ({ ...g, i, total: g.miss + g.fa + g.conf }));
+  const regions = s.regions.map((g, i) => ({ ...g, i, total: g.miss + g.fa + g.conf })).filter(hasErrorType);
+  $('#error-count').textContent = regions.length < s.regions.length ? `${regions.length} / ${s.regions.length}` : `${regions.length}`;
+  if (!regions.length) {
+    box.innerHTML = '<p class="empty">No errors of the selected types.</p>';
+    return;
+  }
   if (errorSort === 'size') regions.sort((a, b) => b.total - a.total);
   const shown = regions.slice(0, 500);
   const names = (list, ids, colors) => ids.map((k) => `${dot(colors[k])}${esc(list[k])}`).join(' ');
@@ -513,12 +641,14 @@ function renderSpeakers() {
         <td class="num">${sp.hyp_time.toFixed(1)}</td>
         <td class="num">${pct(sp.recall, 1)}</td>
         <td class="num">${pct(sp.precision, 1)}</td>
+        <td class="num">${pct(sp.jer, 1)}</td>
       </tr>`).join('');
     box.innerHTML = `
       <table class="table">
         <thead><tr><th>reference</th><th>prediction</th><th>ref (s)</th><th>pred (s)</th>
           <th title="Scored time of the reference speaker that its mapped prediction also covers">recall</th>
-          <th title="Scored time of the prediction during which its mapped reference speaker talks">precision</th></tr></thead>
+          <th title="Scored time of the prediction during which its mapped reference speaker talks">precision</th>
+          <th title="1 − intersection over union with its best-matching prediction (JER mapping)">JER</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   } else {
@@ -573,8 +703,13 @@ function focusRegion(g, play) {
   row?.scrollIntoView({ block: 'nearest' });
 }
 
+// Does a region contain an error of one of the selected types (miss / fa / conf)?
+function hasErrorType(g) {
+  return [...errorTypes].some((type) => g[type] > 0);
+}
+
 function jumpError(dir) {
-  const regions = result?.score?.regions;
+  const regions = result?.score?.regions.filter(hasErrorType);
   if (!regions?.length) return;
   const t = player.currentTime;
   const g = dir > 0 ? regions.find((r) => r.start > t + 0.01) : [...regions].reverse().find((r) => r.start < t - 0.01);
@@ -668,14 +803,29 @@ async function browseFor(field) {
   save();
 }
 
+// Reject when `promise` takes longer than `ms` (a file the browser cannot read otherwise spins forever).
+function withTimeout(promise, ms, message, onTimeout) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    // reject before onTimeout, so the race settles with `message` and not with the abort error onTimeout causes
+    timer = setTimeout(() => { reject(new Error(message)); onTimeout?.(); }, ms);
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
 async function uploadFile(field, file) {
   setStatus(`Uploading ${file.name}…`, true);
   try {
+    // read the file first, so a file the browser cannot read gives its own error instead of a stalled request
+    const unreadable = `The browser could not read ${file.name}. If it is on the server, use Browse or type its path instead.`;
+    const bytes = await withTimeout(file.arrayBuffer().catch((e) => { throw new Error(`${unreadable} (${e.message})`); }),
+      30000, unreadable);
     const form = new FormData();
-    form.append('file', file);
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
+    form.append('file', new Blob([bytes]), file.name);
+    form.append('field', field);
+    if (field === 'audio') form.append('sample_rate', $('#upload-rate').value);
+    const data = await postWithProgress('/api/upload', form, field, file.name,
+      120000 + bytes.byteLength / 500);  // 2 min plus 2 s per MB: the server also converts non-WAV audio
     setVal(field, data.path);
     if (field === 'audio') await audioChanged();
     save();
@@ -684,6 +834,41 @@ async function uploadFile(field, file) {
     setStatus('');
     showError(e);
   }
+}
+
+// POST `form` with a thin progress line under the field's input row (fetch cannot report upload progress).
+// Once every byte is sent the line pulses until the server answers (saving, converting to WAV).
+function postWithProgress(url, form, field, name, timeoutMs) {
+  const row = $(`#${field}`).closest('.row');
+  const bar = document.createElement('div');
+  bar.className = 'upload-bar';
+  bar.innerHTML = '<div></div>';
+  row.after(bar);
+  const fill = bar.firstChild;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.timeout = timeoutMs;
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round((e.loaded / e.total) * 100);
+      fill.style.width = `${pct}%`;
+      setStatus(`Uploading ${name}… ${pct}%`, true);
+    };
+    xhr.upload.onload = () => {
+      bar.classList.add('busy');
+      setStatus(`Processing ${name} on the server…`, true);
+    };
+    xhr.onload = () => {
+      let data;
+      try { data = JSON.parse(xhr.responseText); } catch { data = { detail: `${xhr.status} ${xhr.statusText}` }; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.detail || xhr.statusText));
+    };
+    xhr.onerror = () => reject(new Error(`Uploading ${name} failed: the connection to the server was lost.`));
+    xhr.ontimeout = () => reject(new Error(`Uploading ${name} timed out: the server did not answer. Is it still running?`));
+    xhr.send(form);
+  }).finally(() => bar.remove());
 }
 
 function fieldForFile(name, droppedOn) {
@@ -697,11 +882,19 @@ function bindInputs() {
   for (const btn of document.querySelectorAll('[data-browse]')) {
     btn.addEventListener('click', () => browseFor(btn.dataset.browse));
   }
+  for (const btn of document.querySelectorAll('[data-clear]')) {
+    btn.addEventListener('click', () => {
+      const field = btn.dataset.clear;
+      setVal(field, '');  // lastAudio stays, so the next audio still replaces RTTMs paired with this one
+      save();
+      $(`#${field}`).focus();
+    });
+  }
   const fileInput = $('#file-input');
   for (const btn of document.querySelectorAll('[data-upload]')) {
     btn.addEventListener('click', () => {
       fileInput.dataset.field = btn.dataset.upload;
-      fileInput.accept = btn.dataset.upload === 'audio' ? 'audio/*,.wav,.flac,.mp3,.ogg,.opus,.m4a' : '.rttm';
+      fileInput.accept = { audio: 'audio/*,.wav,.flac,.mp3,.ogg,.opus,.m4a', checkpoint: '.nemo,.ckpt' }[btn.dataset.upload] || '.rttm';
       fileInput.click();
     });
   }
@@ -718,7 +911,10 @@ function bindInputs() {
     document.body.classList.remove('dragging');
     const droppedOn = e.target.closest?.('[data-drop]')?.dataset.drop;
     const files = [...e.dataTransfer.files].sort((a, b) => (fieldForFile(a.name) === 'audio' ? -1 : 0) - (fieldForFile(b.name) === 'audio' ? -1 : 0));
-    for (const file of files) await uploadFile(fieldForFile(file.name, droppedOn), file);
+    for (const file of files) {
+      if (/\.ya?ml$/i.test(file.name)) await loadYaml(file);
+      else await uploadFile(fieldForFile(file.name, droppedOn), file);
+    }
   });
 
   for (const field of Object.keys(FIELDS)) {
@@ -736,6 +932,11 @@ function bindInputs() {
   $('#next-file').addEventListener('click', () => stepAudio(1));
   $('#reset-settings').addEventListener('click', () => { setSettings({}); save(); scheduleRescore(); });
   $('#copy-yaml').addEventListener('click', copyYaml);
+  $('#load-yaml').addEventListener('click', () => $('#yaml-input').click());
+  $('#yaml-input').addEventListener('change', (e) => {
+    if (e.target.files[0]) loadYaml(e.target.files[0]);
+    e.target.value = '';
+  });
 
   $('#folder-stop').addEventListener('click', stopFolder);
   $('#folder-rerun').addEventListener('click', rerunFolder);
@@ -857,6 +1058,31 @@ function setSettings(values) {
   }
 }
 
+// Settings from a YAML file: every `key: value` line naming a setting counts, at any nesting level, so both a
+// NeMo postprocessing_yaml (keys under `parameters:`) and a flat file work. Settings it does not name keep their value.
+async function loadYaml(file) {
+  try {
+    const text = await file.text();
+    const found = {};
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.replace(/\s+#.*$/, '').match(/^\s*([A-Za-z_]+)\s*:\s*(\S.*?)\s*$/);
+      const setting = m && SETTINGS.find((s) => s.key === m[1]);
+      if (!setting) continue;
+      const raw = m[2].replace(/^['"]|['"]$/g, '');
+      if (typeof setting.def === 'boolean') found[setting.key] = /^(true|yes|on|1)$/i.test(raw);
+      else if (Number.isFinite(parseFloat(raw))) found[setting.key] = parseFloat(raw);
+    }
+    const keys = Object.keys(found);
+    if (!keys.length) throw new Error(`${file.name} has none of the settings (${SETTINGS.map((s) => s.key).join(', ')}).`);
+    setSettings({ ...getSettings(), ...found });
+    save();
+    scheduleRescore();
+    setStatus(`Loaded ${keys.join(', ')} from ${file.name}`);
+  } catch (e) {
+    showError(e);
+  }
+}
+
 async function copyYaml() {
   const s = getSettings();
   const yaml = `parameters:\n${PP_KEYS.map((k) => `  ${k}: ${s[k]}`).join('\n')}\n`;
@@ -929,12 +1155,42 @@ function bindResults() {
   player.addEventListener('timeupdate', updateTime);
   player.addEventListener('seeked', updateTime);
   $('#speed').addEventListener('change', (e) => { player.playbackRate = parseFloat(e.target.value); });
+  $('#volume').addEventListener('input', (e) => { player.volume = parseFloat(e.target.value); player.muted = false; });
+  $('#volume').addEventListener('change', (e) => e.target.blur());  // give the arrow keys back to seeking
+  $('#mute-btn').addEventListener('click', toggleMute);
+  player.addEventListener('volumechange', showVolume);
+  const volume = store.get('volume', { level: 1, muted: false });
+  player.volume = volume.level;
+  player.muted = volume.muted;
+  showVolume();
   $('#zoom-in').addEventListener('click', () => timeline.zoom(0.5));
   $('#zoom-out').addEventListener('click', () => timeline.zoom(2));
   $('#zoom-fit').addEventListener('click', () => timeline.fit());
+  $('#fullscreen-btn').addEventListener('click', toggleFullscreen);
+  document.addEventListener('fullscreenchange', () => {
+    $('#fullscreen-btn').classList.toggle('on', Boolean(document.fullscreenElement));
+  });
   $('#prev-err').addEventListener('click', () => jumpError(-1));
   $('#next-err').addEventListener('click', () => jumpError(1));
   $('#show-all').addEventListener('change', () => renderTimeline(true));
+  $('#show-diff').addEventListener('change', (e) => { store.set('showDiff', e.target.checked); renderTimeline(true); });
+  $('#show-diff').checked = store.get('showDiff', true);
+  $('#lane-size').value = laneSize;
+  $('#lane-size').addEventListener('change', (e) => { laneSize = e.target.value; store.set('laneSize', laneSize); renderTimeline(true); });
+  for (const b of document.querySelectorAll('[data-view]')) {
+    b.addEventListener('click', () => { viewMode = b.dataset.view; store.set('viewMode', viewMode); renderTimeline(true); });
+  }
+  $('#upload-rate').value = store.get('uploadRate', '0');
+  $('#upload-rate').addEventListener('change', (e) => store.set('uploadRate', e.target.value));
+  $('#speaker-filter').addEventListener('click', (e) => {
+    const keys = JSON.parse($('#speaker-filter').dataset.keys || '[]');
+    if (e.target.closest('[data-speaker-all]')) return setHiddenSpeakers([...hiddenSpeakers].filter((k) => !keys.includes(k)));
+    const chip = e.target.closest('[data-speaker]');
+    if (!chip) return;
+    const key = chip.dataset.speaker;
+    if (e.detail === 2) return setHiddenSpeakers([...hiddenSpeakers, ...keys.filter((k) => k !== key)].filter((k) => k !== key));  // solo
+    setHiddenSpeakers(hiddenSpeakers.has(key) ? [...hiddenSpeakers].filter((k) => k !== key) : [...hiddenSpeakers, key]);
+  });
   $('#dl-rttm').addEventListener('click', () => download(`${result.file_id}.rttm`, result.rttm, 'text/plain'));
   $('#dl-json').addEventListener('click', () => download(`${result.file_id}.json`, JSON.stringify(result), 'application/json'));
   for (const btn of document.querySelectorAll('[data-sort]')) {
@@ -944,25 +1200,58 @@ function bindResults() {
       renderErrors();
     });
   }
+  for (const btn of document.querySelectorAll('[data-etype]')) {
+    btn.classList.toggle('on', errorTypes.has(btn.dataset.etype));
+    btn.addEventListener('click', () => {
+      const type = btn.dataset.etype;
+      if (errorTypes.has(type)) errorTypes.delete(type); else errorTypes.add(type);
+      btn.classList.toggle('on', errorTypes.has(type));
+      store.set('errorTypes', [...errorTypes]);
+      renderErrors();
+    });
+  }
   $('#errors').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-i]');
     if (tr) focusRegion(result.score.regions[Number(tr.dataset.i)], Boolean(e.target.closest('.play')));
   });
 }
 
+// The results (metrics, timeline, error list, speakers table) on the whole screen; Esc or f leaves.
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $('#results').requestFullscreen().catch((e) => showError(e));
+}
+
+function toggleMute() {
+  if (!player.muted && player.volume === 0) player.volume = 1;  // unmuting at volume 0 would stay silent
+  else player.muted = !player.muted;
+}
+
+// Reflect the player's volume in the slider and button, and remember it across reloads.
+function showVolume() {
+  const silent = player.muted || player.volume === 0;
+  $('#volume').value = player.muted ? 0 : player.volume;
+  $('#mute-btn').textContent = silent ? '🔇' : player.volume < 0.5 ? '🔉' : '🔊';
+  store.set('volume', { level: player.volume, muted: player.muted });
+}
+
+const SEEK_STEP = 5;  // seconds the arrow keys jump
+
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
     if (!result || e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea, dialog')) return;
     const actions = {
       ' ': togglePlay,
-      ArrowLeft: () => timeline.pan(-0.25),
-      ArrowRight: () => timeline.pan(0.25),
+      ArrowLeft: () => (e.shiftKey ? timeline.pan(-0.25) : timeline.seekBy(-SEEK_STEP)),
+      ArrowRight: () => (e.shiftKey ? timeline.pan(0.25) : timeline.seekBy(SEEK_STEP)),
       '+': () => timeline.zoom(0.5),
       '=': () => timeline.zoom(0.5),
       '-': () => timeline.zoom(2),
       0: () => timeline.fit(),
       n: () => jumpError(1),
       p: () => jumpError(-1),
+      m: toggleMute,
+      f: toggleFullscreen,
     };
     const action = actions[e.key];
     if (action) { e.preventDefault(); action(); }

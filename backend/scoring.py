@@ -7,6 +7,10 @@ DER follows the NIST md-eval definition:
 It is computed on a 10 ms grid with an optimal one-to-one speaker mapping (Hungarian algorithm),
 an unscored collar of +/- `collar` seconds around every reference segment boundary, and, optionally,
 without the regions where two or more reference speakers overlap.
+
+JER follows the DIHARD (dscore) definition: every reference speaker is paired with at most one
+predicted speaker by a separate optimal mapping that maximizes intersection over union, its error is
+1 - IoU (1 when unpaired), and JER is the mean over reference speakers. It uses the same scored region.
 """
 
 from __future__ import annotations
@@ -132,6 +136,17 @@ def score(ref: tuple[list[str], list[list]], hyp: tuple[list[str], list[list]], 
     def rate(frames) -> float | None:
         return round(float(frames) / total, 5) if total else None
 
+    # JER: its own mapping, maximizing the per-pair intersection over union.
+    ref_time = R[scored].sum(axis=0).astype(np.float32)
+    hyp_time = H[scored].sum(axis=0).astype(np.float32)
+    union = ref_time[:, None] + hyp_time[None, :] - cooc
+    iou = np.divide(cooc, union, out=np.zeros_like(cooc), where=union > 0)
+    ref_jer = np.ones(len(ref_names))
+    if iou.size:
+        for r, h in zip(*linear_sum_assignment(iou, maximize=True)):
+            ref_jer[r] = 1.0 - iou[r, h]
+    jer_speakers = ref_time > 0  # speakers with no scored time are left out, like dscore
+
     regions = []
     for a, b in _runs(miss + fa + conf > 0):
         regions.append({
@@ -158,17 +173,21 @@ def score(ref: tuple[list[str], list[list]], hyp: tuple[list[str], list[list]], 
             "hyp_time": _sec(np.count_nonzero(H[:, h])) if h is not None else 0.0,
             "recall": round(hit / ref_scored, 4) if ref_scored else None,
             "precision": round(hit / hyp_scored, 4) if hyp_scored else None,
+            "jer": round(float(ref_jer[r]), 4) if jer_speakers[r] else None,
         })
     for h in range(len(hyp_names)):
         if hyp_to_ref[h] is None and H[:, h].any():
             speakers.append({"ref": None, "hyp": h, "ref_time": 0.0, "hyp_time": _sec(np.count_nonzero(H[:, h])),
-                             "recall": None, "precision": 0.0})
+                             "recall": None, "precision": 0.0, "jer": None})
 
     return {
         "der": rate(miss.sum() + fa.sum() + conf.sum()),
         "miss": rate(miss.sum()),
         "fa": rate(fa.sum()),
         "conf": rate(conf.sum()),
+        "jer": round(float(ref_jer[jer_speakers].mean()), 5) if jer_speakers.any() else None,
+        "jer_sum": round(float(ref_jer[jer_speakers].sum()), 5),
+        "jer_speakers": int(jer_speakers.sum()),
         "miss_s": _sec(miss.sum()),
         "fa_s": _sec(fa.sum()),
         "conf_s": _sec(conf.sum()),

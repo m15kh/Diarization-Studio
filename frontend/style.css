@@ -16,6 +16,10 @@
   --grid: rgba(15, 23, 42, 0.07);
   --stripe: rgba(15, 23, 42, 0.03);
   --lane: rgba(15, 23, 42, 0.05);
+  --track-ref: rgba(15, 23, 42, 0.04);   /* per-speaker lane: reference track background */
+  --track-pred: rgba(15, 23, 42, 0.11);  /* per-speaker lane: prediction track background */
+  --tag-ref: #a16207;   /* REF badge in the lane labels */
+  --tag-pred: #0e7490;  /* PRED badge in the lane labels */
   --highlight: #475569;
   --wave: #64748b;
   --miss: #e11d48;
@@ -52,6 +56,10 @@
     --grid: rgba(255, 255, 255, 0.08);
     --stripe: rgba(255, 255, 255, 0.03);
     --lane: rgba(255, 255, 255, 0.05);
+    --track-ref: rgba(255, 255, 255, 0.03);
+    --track-pred: rgba(255, 255, 255, 0.10);
+    --tag-ref: #facc15;
+    --tag-pred: #22d3ee;
     --highlight: #e2e8f0;
     --wave: #94a3b8;
     --overlap: #64748b;
@@ -121,11 +129,16 @@ input:not([type]), input[type="number"] {
 }
 input:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent); }
 input[type="range"], input[type="checkbox"] { accent-color: var(--accent); }
+#volume { width: 80px; }
 select {
   height: 34px; padding: 0 6px; border: 1px solid var(--input-border); border-radius: 8px;
   background: var(--panel); color: var(--text); font: 13px var(--font);
 }
 .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.upload-bar { height: 2px; margin-top: 4px; border-radius: 1px; background: var(--border); overflow: hidden; }
+.upload-bar > div { width: 0; height: 100%; background: var(--accent); transition: width 0.15s; }
+.upload-bar.busy > div { width: 100%; animation: upload-pulse 1s ease-in-out infinite alternate; }
+@keyframes upload-pulse { from { opacity: 1; } to { opacity: 0.3; } }
 kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--label-bg); font: 11px var(--mono); }
 
 .btn {
@@ -187,9 +200,16 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 .time { min-width: 150px; text-align: center; font: 13px var(--mono); }
 .check { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
 .check[hidden] { display: none; }
+.speaker-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
+.speaker-filter[hidden] { display: none; }
+.speaker-filter .chip { display: inline-flex; align-items: center; gap: 6px; }
+.speaker-filter .chip:not(.on) { opacity: 0.45; text-decoration: line-through; }
+.speaker-filter .chip i { width: 8px; height: 8px; border-radius: 2px; }
 #overview { display: block; width: 100%; height: 40px; margin-bottom: 6px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; touch-action: none; }
 .canvas-wrap { position: relative; }
 #timeline { display: block; width: 100%; height: 160px; cursor: crosshair; touch-action: none; }
+#results:fullscreen { overflow: auto; padding: 16px 24px 24px; background: var(--bg); }
+#results:fullscreen::backdrop { background: var(--bg); }
 #tooltip {
   position: absolute; z-index: 5; pointer-events: none; padding: 7px 10px; white-space: nowrap; font-size: 12px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
@@ -201,6 +221,11 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 .scroll { max-height: 440px; overflow: auto; }
 .sorter { position: absolute; top: 6px; right: 12px; display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .sorter[hidden] { display: none; }
+.sorter .sep { width: 1px; height: 16px; margin: 0 4px; background: var(--border); }
+.sorter [data-etype].on { color: #fff; }
+.sorter [data-etype="miss"].on { background: var(--miss); border-color: var(--miss); }
+.sorter [data-etype="fa"].on { background: var(--fa); border-color: var(--fa); }
+.sorter [data-etype="conf"].on { background: var(--conf); border-color: var(--conf); }
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th {
   position: sticky; top: 0; z-index: 1; padding: 6px 8px; text-align: left;

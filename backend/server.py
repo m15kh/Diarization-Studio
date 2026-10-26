@@ -12,7 +12,7 @@ import argparse
 import gc
 import os
 import shutil
-import tempfile
+import subprocess
 import threading
 import time
 import traceback
@@ -21,7 +21,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -29,7 +29,9 @@ from pydantic import BaseModel
 import scoring
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-UPLOAD_DIR = Path(tempfile.gettempdir()) / "diar_inspector_uploads"
+# uploads/audio and uploads/rttm sit side by side, so an uploaded reference is found next to its audio (../rttm)
+UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
+UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints"}
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
 EXTENSIONS = {"checkpoint": {".nemo", ".ckpt"}, "audio": AUDIO_EXTS, "rttm": {".rttm"}}
 PP_KEYS = {"onset", "offset", "pad_onset", "pad_offset", "min_duration_on", "min_duration_off"}
@@ -247,13 +249,42 @@ def pair(audio: str, prev_audio: str = "", ref: str = "", hyp: str = ""):
 
 
 @app.post("/api/upload")
-def upload(file: UploadFile = File(...)):
-    """Store an uploaded file on the server and return its path."""
-    dest = UPLOAD_DIR / uuid.uuid4().hex[:8] / Path(file.filename or "upload").name
+def upload(file: UploadFile = File(...), field: str = Form(""), sample_rate: int = Form(0)):
+    """Store an uploaded file in uploads/<kind>/ on the server and return its path.
+
+    A file with the same name is replaced (results are cached by modification time, so this is safe).
+    Uploaded audio that is not WAV (mp3, m4a, ...) is converted to WAV and only the WAV is kept;
+    with `sample_rate` > 0 it is also resampled to that rate (a WAV at another rate included).
+    """
+    dest = UPLOAD_DIR / UPLOAD_FOLDERS.get(field, "other") / Path(file.filename or "upload").name
     dest.parent.mkdir(parents=True, exist_ok=True)
     with dest.open("wb") as fh:
         shutil.copyfileobj(file.file, fh)
+    if field == "audio":
+        is_wav = dest.suffix.lower() == ".wav"
+        if not is_wav or (sample_rate > 0 and audio_info(str(dest)).get("sample_rate") != sample_rate):
+            dest = to_wav(dest, sample_rate)
     return {"path": str(dest)}
+
+
+def to_wav(src: Path, sample_rate: int = 0) -> Path:
+    """Convert an audio file to 16-bit PCM WAV next to it with ffmpeg (resampled when `sample_rate` > 0).
+
+    The original is replaced by the WAV.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise ValueError(f"Cannot convert {src.name} to WAV: ffmpeg is not installed on the server.")
+    wav = src.with_suffix(".wav")
+    tmp = src.with_name(f".{uuid.uuid4().hex}.wav")  # ffmpeg cannot write over its own input (a WAV being resampled)
+    rate = ["-ar", str(sample_rate)] if sample_rate > 0 else []
+    proc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), *rate, "-c:a", "pcm_s16le", str(tmp)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"Could not convert {src.name} to WAV: {proc.stderr.strip() or 'ffmpeg failed'}")
+    src.unlink()
+    tmp.replace(wav)
+    return wav
 
 
 @app.get("/api/audio")
@@ -324,6 +355,15 @@ def audio_info(path: str) -> dict:
 def check_recording_id(out: dict, what: str, rec_id: str, file_id: str) -> None:
     if rec_id != file_id:
         out["warnings"].append(f"{what} is for recording '{rec_id}' but the audio file is '{file_id}'.")
+
+
+@app.middleware("http")
+async def no_stale_frontend(request, call_next):
+    """Make browsers revalidate the page on every load, so an edited frontend is never served from cache."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

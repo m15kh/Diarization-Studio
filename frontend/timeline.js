@@ -2,8 +2,10 @@
 // all sharing one time axis, plus an overview strip of the whole file.
 // Mouse: wheel = zoom, shift+wheel / drag = pan, click = seek, shift+drag = zoom to region,
 // double-click = fit. Rows are plain objects built by app.js:
-//   { kind: 'header' | 'seg' | 'ref' | 'hyp' | 'err', label, color | colorVar, segs: [[start, end], ...],
-//     probs?, step?, onset?, offset?, unscored?, highlight?, band?, muted? }
+//   { kind: 'header' | 'seg' | 'ref' | 'hyp' | 'err' | 'stack', label, color | colorVar, segs: [[start, end], ...],
+//     probs?, step?, onset?, offset?, unscored?, highlight?, band?, muted?, diff?: { miss, extra }, tag?: 'ref' | 'pred' }
+// A 'stack' row draws several thin tracks in one lane: tracks: [{ color | colorVar, segs, label?, tag?, bgVar? }, ...]
+// (a track label replaces the row label; bgVar gives a track its own background).
 
 export const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2',
   '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
@@ -12,7 +14,8 @@ const GUTTER = 150;      // left column for lane labels (px)
 const PAD_RIGHT = 12;
 const MIN_SPAN = 0.05;   // deepest zoom: 50 ms across the plot
 const TICK_STEPS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
-const HEIGHT = { ruler: 22, wave: 100, header: 26, seg: 26, ref: 16, hyp: 28, err: 16 };
+const HEIGHT = { ruler: 22, wave: 100, header: 26, seg: 26, ref: 16, hyp: 28, err: 16, stack: 32 };
+const LANE_KINDS = new Set(['seg', 'ref', 'hyp', 'err', 'stack']);
 
 export function fmtTime(t, digits = 2) {
   const scale = 10 ** digits;
@@ -34,6 +37,7 @@ export class Timeline {
     this.hoverX = null;
     this.drag = null;
     this.sel = null;
+    this.follow = true;  // during playback, scroll the view along with the cursor
     this.stopAt = null;
     this.width = 0;
     this.dirty = true;   // static layer must be redrawn
@@ -45,11 +49,15 @@ export class Timeline {
     requestAnimationFrame(loop);
   }
 
-  setData({ duration, rows, marks, keepView }) {
+  // `laneScale` makes the speaker and error lanes taller (the ruler, waveform and headers keep their height).
+  setData({ duration, rows, marks, keepView, laneScale = 1 }) {
     const sameLength = Math.abs(duration - this.duration) < 1e-3;
     this.duration = duration;
     this.rows = [{ kind: 'ruler' }, { kind: 'wave', label: 'waveform' }, ...rows]
-      .map((row) => ({ h: HEIGHT[row.kind], ...row }));
+      .map((row) => {
+        const h = row.h ?? HEIGHT[row.kind];
+        return { ...row, h: LANE_KINDS.has(row.kind) ? Math.round(h * laneScale) : h };
+      });
     this.marks = marks || [];
     if (!(keepView && sameLength)) this.view = [0, duration];
     this._layout();
@@ -66,7 +74,10 @@ export class Timeline {
 
   // ---- view -------------------------------------------------------------------------------
 
-  setView(a, b) {
+  // Any view change not made by playback itself (`auto`) stops the view from following the cursor, so you can look
+  // elsewhere while it plays; following resumes once the cursor is back in view, or on seek / play.
+  setView(a, b, auto = false) {
+    if (!auto) this.follow = false;
     const d = this.duration || 1;
     const span = Math.min(Math.max(b - a, Math.min(MIN_SPAN, d)), d);
     const start = Math.min(Math.max(a, 0), d - span);
@@ -96,8 +107,17 @@ export class Timeline {
 
   seek(t) {
     this.stopAt = null;
+    this.follow = true;
     if (this.player.src) this.player.currentTime = Math.min(Math.max(t, 0), this.duration);
     this.redraw = true;
+  }
+
+  // Move the playback position by `dt` seconds, scrolling the view when the cursor leaves it.
+  seekBy(dt) {
+    if (!this.player.src) return;
+    this.seek(this.player.currentTime + dt);
+    const t = this.player.currentTime, [a, b] = this.view, span = b - a;
+    if (t < a || t > b) this.setView(t - span * 0.5, t + span * 0.5, true);
   }
 
   playRange(a, b) {
@@ -146,9 +166,11 @@ export class Timeline {
     if (!p.paused) {
       if (this.stopAt != null && p.currentTime >= this.stopAt) p.pause();
       const [a, b] = this.view;
-      if (!this.drag && (p.currentTime > b || p.currentTime < a)) {  // follow the cursor page by page
+      const inView = p.currentTime >= a && p.currentTime <= b;
+      if (inView) this.follow = true;  // the cursor reached the part being looked at: follow it from here
+      else if (this.follow && !this.drag) {  // follow the cursor page by page
         const span = b - a;
-        this.setView(p.currentTime - span * 0.05, p.currentTime + span * 0.95);
+        this.setView(p.currentTime - span * 0.05, p.currentTime + span * 0.95, true);
       }
     }
     if (p.currentTime !== this.lastCursor) { this.lastCursor = p.currentTime; this.redraw = true; }
@@ -202,6 +224,7 @@ export class Timeline {
       else if (row.kind === 'seg') this._drawPills(ctx, row, th);
       else if (row.kind === 'ref') this._drawSegs(ctx, row.segs, row.y + 3, row.h - 6, row.color, 0.9);
       else if (row.kind === 'hyp') this._drawHyp(ctx, row, th);
+      else if (row.kind === 'stack') this._drawStack(ctx, row, th);
       else if (row.kind === 'err') {
         if (row.unscored) this._drawSegs(ctx, row.unscored, row.y, row.h, th.unscored, 1);
         this._drawSegs(ctx, row.segs, row.y + 2, row.h - 4, th.v(row.colorVar), 0.9);
@@ -221,14 +244,46 @@ export class Timeline {
       ctx.font = `12px ${th.font}`;
       return;
     }
+    if (row.kind === 'stack' && row.tracks.some((t) => t.label)) { this._drawTrackLabels(ctx, row, th); return; }
     let x = 10;
     if (row.color || row.colorVar) {
       ctx.fillStyle = row.color || th.v(row.colorVar);
       ctx.fillRect(x, mid - 4, 8, 8);
       x += 14;
     }
+    if (row.tag) x = this._drawTag(ctx, row.tag, x, mid, th);
     ctx.fillStyle = row.muted ? th.muted : th.text;
     ctx.fillText(ellipsize(ctx, row.label, GUTTER - x - 8), x, mid);
+  }
+
+  // A small outlined 'REF' / 'PRED' badge in its own color (--tag-ref / --tag-pred); returns the x after it.
+  _drawTag(ctx, tag, x, mid, th) {
+    const font = ctx.font;
+    ctx.font = `700 9px ${th.font}`;
+    const text = tag.toUpperCase(), w = ctx.measureText(text).width + 8;
+    const color = th.v(`--tag-${tag}`);
+    ctx.strokeStyle = ctx.fillStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(x + 0.5, mid - 6.5, w, 13, 3); ctx.stroke();
+    ctx.fillText(text, x + 4.5, mid + 0.5);
+    ctx.font = font;
+    return x + w + 6;
+  }
+
+  // One label per track, level with it; the first track gets the row's color square.
+  _drawTrackLabels(ctx, row, th) {
+    const top = row.y + 3, th1 = (row.h - 6) / row.tracks.length;
+    ctx.font = `11px ${th.font}`;
+    row.tracks.forEach((track, i) => {
+      const mid = top + (i + 0.5) * th1;
+      let x = 10;
+      if (i === 0 && row.color) { ctx.fillStyle = row.color; ctx.fillRect(x, mid - 4, 8, 8); }
+      x += 14;
+      if (track.tag) x = this._drawTag(ctx, track.tag, x, mid, th);
+      ctx.fillStyle = i === 0 ? th.text : th.muted;
+      ctx.fillText(ellipsize(ctx, track.label || '', GUTTER - x - 8), x, mid);
+    });
+    ctx.font = `12px ${th.font}`;
   }
 
   _drawSegs(ctx, segs, y, h, color, alpha) {
@@ -278,7 +333,25 @@ export class Timeline {
     ctx.globalAlpha = 1;
   }
 
+  _drawStack(ctx, row, th) {
+    const top = row.y + 3, h = row.h - 6;
+    const n = Math.max(1, row.tracks.length), th1 = h / n;
+    ctx.fillStyle = th.lane;
+    if (!row.tracks.some((t) => t.bgVar)) ctx.fillRect(GUTTER, top, this.plotWidth, h);
+    row.tracks.forEach((track, i) => {
+      if (!track.bgVar) return;
+      ctx.fillStyle = th.v(track.bgVar);
+      ctx.fillRect(GUTTER, top + i * th1, this.plotWidth, th1);
+    });
+    if (row.unscored) this._drawSegs(ctx, row.unscored, top, h, th.unscored, 1);
+    row.tracks.forEach((track, i) => {
+      this._drawSegs(ctx, track.segs, top + i * th1 + 0.5, Math.max(1, th1 - 1), track.color || th.v(track.colorVar), 0.95);
+    });
+    if (row.diff) this._drawDiff(ctx, row, th);  // on top, so the strip along the bottom stays visible
+  }
+
   _drawHyp(ctx, row, th) {
+    if (row.diff) this._drawDiff(ctx, row, th);
     if (!row.probs) { this._drawSegs(ctx, row.segs, row.y + 3, row.h - 6, row.color, 0.9); return; }
     const top = row.y + 3, h = row.h - 6;
     const yOf = (p) => top + (1 - p) * h;
@@ -307,6 +380,15 @@ export class Timeline {
     ctx.strokeStyle = row.color;
     ctx.lineWidth = 1.25;
     ctx.stroke();
+  }
+
+  // Where a predicted speaker differs from its reference speaker: a faint column and a strip along the bottom
+  // (missed = reference talks but the prediction does not, extra = the other way round).
+  _drawDiff(ctx, row, th) {
+    for (const [segs, color] of [[row.diff.miss, th.v('--miss')], [row.diff.extra, th.v('--fa')]]) {
+      this._drawSegs(ctx, segs, row.y, row.h, color, 0.16);
+      this._drawSegs(ctx, segs, row.y + row.h - 4, 3, color, 0.95);
+    }
   }
 
   _drawWave(ctx, row, th) {
@@ -479,6 +561,7 @@ export class Timeline {
     ov.addEventListener('pointerup', () => { this.ovDrag = false; });
 
     this.player.addEventListener('pause', () => { this.stopAt = null; });
+    this.player.addEventListener('play', () => { this.follow = true; });
   }
 
   _showTooltip(e) {
