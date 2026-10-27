@@ -7,6 +7,14 @@ const secs = (x) => `${x.toFixed(2)} s`;
 const basename = (p) => p.split(/[\\/]/).pop();
 const dot = (color) => `<span class="dot" style="background:${color}"></span>`;
 const isFolder = (path) => Boolean(path) && !/\.(wav|flac|mp3|ogg|opus|m4a|webm)$/i.test(path);
+// Reference → predicted speaker count; the prediction is green when right, red (▼) with too few, amber (▲) with too many.
+const speakerCount = (ref, hyp, digits = 0) => {
+  const d = hyp - ref, same = Math.abs(d) < (digits ? 0.05 : 0.5);
+  const [cls, mark, tip] = same ? ['spk-ok', '', 'right number of speakers']
+    : d < 0 ? ['spk-few', ` ▼${Math.abs(d).toFixed(digits)}`, 'too few speakers predicted (missed)']
+      : ['spk-many', ` ▲${d.toFixed(digits)}`, 'too many speakers predicted (extra)'];
+  return `<span title="${tip}">${ref.toFixed(digits)} → <span class="${cls}">${hyp.toFixed(digits)}${mark}</span></span>`;
+};
 const card = (label, value, sub = '', cls = '') => `<div class="metric ${cls}"><div class="m-label">${label}</div>
   <div class="m-value">${value}</div><div class="m-sub" title="${sub}">${sub}</div></div>`;
 
@@ -346,7 +354,7 @@ function renderFolder() {
       return `<tr data-f="${i}"${cls}>${first}${'<td class="num">–</td>'.repeat(head.length - lead - 1)}<td class="num">${wait}</td></tr>`;
     }
     const spk = res.ref
-      ? `<span class="${res.ref.speakers !== res.hyp.speakers ? 'warn' : ''}">${res.ref.speakers} → ${res.hyp.speakers}</span>`
+      ? speakerCount(res.ref.speakers, res.hyp.speakers)
       : res.hyp.speakers;
     const nums = hasRef
       ? (s ? [pct(s.der), pct(s.miss), pct(s.fa), pct(s.conf), pct(s.jer)] : ['–', '–', '–', '–', '–'])
@@ -485,7 +493,7 @@ function renderSets() {
     <td class="num">${p1(s.der)}</td><td class="num">${p1(s.speech ? s.miss / s.speech : null)}</td>
     <td class="num">${p1(s.speech ? s.fa / s.speech : null)}</td><td class="num">${p1(s.speech ? s.conf / s.speech : null)}</td>
     <td class="num">${p1(s.jer)}</td><td>${s.der == null ? '–' : main(s)}</td>
-    <td class="num">${s.refSpk == null ? '–' : `${s.refSpk.toFixed(1)} → ${s.hypSpk.toFixed(1)}`}</td>
+    <td class="num">${s.refSpk == null ? '–' : speakerCount(s.refSpk, s.hypSpk, 1)}</td>
     <td class="num">${share(s.exact, s.counted)}</td><td class="num">${share(s.under, s.counted)}</td><td class="num">${share(s.over, s.counted)}</td>
     <td class="num">${p1(s.overlap)}</td></tr>`;
   $('#set-table').innerHTML = `<table class="table">
@@ -641,7 +649,7 @@ function renderMetrics() {
     cards.push(card('Confusion', pct(s.conf), secs(s.conf_s), 'conf'));
     cards.push(card('JER', pct(s.jer), `mean over ${s.jer_speakers} reference speakers`));
     const nr = res.ref.speakers, nh = res.hyp.speakers;
-    cards.push(card('Speakers', `${nr} → ${nh}`, 'reference → predicted', nr !== nh ? 'warn' : ''));
+    cards.push(card('Speakers', speakerCount(nr, nh), 'reference → predicted'));
     const [ro, ho] = [overlap(res.ref), overlap(res.hyp)].map((x) => (x == null ? '–' : (x * 100).toFixed(1)));
     cards.push(card('Overlap', `${ro} → ${ho}%`, 'share of speech, ref → pred'));
   } else {
@@ -716,12 +724,14 @@ function renderTimeline(keepView) {
       chips.push({ key: hypKey(h), label: `${name} (extra)`, color: v.hypColor[h] });
       if (shown(hypKey(h))) rows.push({ ...hypRow(h, `${name} (extra)`, false), tag: 'pred', diff: diff([], v.hypSegs[h]) });
     });
+    rows.push(...overlapRows(diff));
     const scoring = `collar ±${res.score.collar} s${res.score.ignore_overlap ? ' · overlap not scored' : ''}`;
-    rows.push({ kind: 'header', label: `Errors · ${scoring}` });
-    rows.push({ kind: 'err', label: 'missed', colorVar: '--miss', segs: lanes.miss, unscored: lanes.unscored });
-    rows.push({ kind: 'err', label: 'false alarm', colorVar: '--fa', segs: lanes.fa, unscored: lanes.unscored });
-    rows.push({ kind: 'err', label: 'confusion', colorVar: '--conf', segs: lanes.conf, unscored: lanes.unscored });
-    rows.push({ kind: 'err', label: 'overlap (ref)', colorVar: '--overlap', segs: lanes.overlap });
+    const sc = res.score, sum = (segs) => segs.reduce((acc, [s, e]) => acc + e - s, 0);
+    rows.push({ kind: 'header', label: `Errors · ${derParts(sc)} · ${scoring}` });
+    rows.push({ kind: 'err', label: `missed · ${pct(sc.miss)}`, colorVar: '--miss', segs: lanes.miss, unscored: lanes.unscored, numbers: true });
+    rows.push({ kind: 'err', label: `false alarm · ${pct(sc.fa)}`, colorVar: '--fa', segs: lanes.fa, unscored: lanes.unscored, numbers: true });
+    rows.push({ kind: 'err', label: `confusion · ${pct(sc.conf)}`, colorVar: '--conf', segs: lanes.conf, unscored: lanes.unscored, numbers: true });
+    rows.push({ kind: 'err', label: `ref overlap · ${sum(lanes.overlap).toFixed(1)} s`, colorVar: '--overlap', segs: lanes.overlap });
   } else if (res.probs) {  // without probabilities this would repeat the diarization lanes
     rows.push({ kind: 'header', label: 'Speaker probability · dashed: onset / offset' });
     res.hyp.names.forEach((name, h) => {
@@ -757,7 +767,7 @@ function simpleRows(shown, hypKey) {
     const tracks = [];
     res.hyp.names.forEach((_, h) => { if (visible(h)) tracks.push({ color: v.hypColor[h], segs: v.hypSegs[h] }); });
     return [{ kind: 'header', label: 'Prediction · one track per speaker' },
-            { kind: 'stack', label: 'prediction', tracks, h: Math.max(26, tracks.length * 8 + 6) }];
+            { kind: 'stack', label: 'prediction', tracks, h: Math.max(26, tracks.length * 8 + 6) }, ...overlapRows(null)];
   }
   const map = res.score.hyp_to_ref, lanes = res.score.lanes;
   const unscored = mergeSegs(lanes.unscored);
@@ -780,14 +790,38 @@ function simpleRows(shown, hypKey) {
   res.hyp.names.forEach((name, h) => {  // predicted speakers with no reference speaker
     if (map[h] == null && visible(h)) rows.push(pair('— no reference', `${name} (extra)`, v.hypColor[h], [], v.hypSegs[h], false));
   });
+  rows.push(...overlapRows(diff));
   const scoring = `collar ±${res.score.collar} s${res.score.ignore_overlap ? ' · overlap not scored' : ''}`;
   rows.push(
-    { kind: 'header', label: `Errors · red: missed · amber: false alarm · purple: confusion · ${scoring}` },
+    { kind: 'header', label: `Errors · ${derParts(res.score)} · ${scoring}` },
     { kind: 'stack', label: 'errors', h: 48, unscored: lanes.unscored,
-      tracks: [{ colorVar: '--miss', segs: lanes.miss, label: 'missed' }, { colorVar: '--fa', segs: lanes.fa, label: 'false alarm' },
-               { colorVar: '--conf', segs: lanes.conf, label: 'confusion' }] },
+      tracks: [{ colorVar: '--miss', segs: lanes.miss, label: `missed · ${pct(res.score.miss)}`, numbers: true },
+               { colorVar: '--fa', segs: lanes.fa, label: `false alarm · ${pct(res.score.fa)}`, numbers: true },
+               { colorVar: '--conf', segs: lanes.conf, label: `confusion · ${pct(res.score.conf)}`, numbers: true }] },
   );
   return rows;
+}
+
+// "DER 16.63% = (missed 0.00 s + false alarm 1.05 s + confusion 1.44 s) ÷ 15.0 s scored speech": the marks show seconds,
+// the DER divides their sum by the scored reference speech (silence and the collar around every boundary do not count).
+function derParts(s) {
+  return `DER ${pct(s.der)} = (missed ${s.miss_s.toFixed(2)} s + false alarm ${s.fa_s.toFixed(2)} s + confusion ${
+    s.conf_s.toFixed(2)} s) ÷ ${s.ref_speech.toFixed(1)} s scored speech`;
+}
+
+// Overlap: where 2+ speakers talk at once in the reference (top) and in the prediction (bottom), with the overlap the
+// prediction misses (red) or adds (amber) when `diff` (refSegs, hypSegs) => { miss, extra } is given. All speakers
+// count, hidden ones too. Clicking a part plays it (see Timeline._errorSegAt).
+function overlapRows(diff) {
+  const res = result, v = view;
+  const ref = res.ref ? overlapRegions(v.refSegs) : null;
+  const secs = (segs) => `${segs.reduce((acc, [s, e]) => acc + e - s, 0).toFixed(1)} s`;
+  const tracks = [{ colorVar: '--highlight', segs: v.hypOverlap, label: secs(v.hypOverlap), tag: 'pred', bgVar: '--track-pred' }];
+  if (ref) tracks.unshift({ colorVar: '--highlight', segs: ref, label: secs(ref), tag: 'ref', bgVar: '--track-ref' });
+  return [
+    { kind: 'header', label: `Overlap · 2+ speakers at once${ref ? ` · REF: real (top) · PRED: model (bottom)${diff && $('#show-diff').checked ? ' · red: missed overlap · amber: extra overlap' : ''}` : ' · prediction'}` },
+    { kind: 'stack', label: 'overlap', h: ref ? 36 : 20, tracks, diff: ref && diff ? diff(ref, v.hypOverlap) : null },
+  ];
 }
 
 // One toggle per speaker above the timeline; a hidden speaker's lanes are left out of every section.
@@ -931,7 +965,8 @@ function describeTime(t) {
   const pred = res.hyp.names.map((name, h) => {
     const p = frame >= 0 ? v.probs[h][frame] : null;
     if (!on(v.hypSegs[h]) && !(p >= 0.05)) return '';
-    return `${dot(v.hypColor[h])}${esc(name)}${p != null ? ` <span class="muted">${p.toFixed(2)}</span>` : ''}`;
+    // the model's probability that this speaker talks here, in percent
+    return `${dot(v.hypColor[h])}${esc(name)}${p != null ? ` <span class="muted" title="model probability">${Math.round(p * 100)}%</span>` : ''}`;
   }).filter(Boolean);
   lines.push(`<div><span class="k">pred</span>${pred.join(' ') || '<i>silence</i>'}</div>`);
   if (res.score) {

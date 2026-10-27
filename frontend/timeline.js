@@ -192,7 +192,7 @@ export class Timeline {
     const v = (name) => css.getPropertyValue(name).trim();
     return {
       v, text: v('--text'), muted: v('--muted'), grid: v('--grid'), wave: v('--wave'), accent: v('--accent'),
-      stripe: v('--stripe'), unscored: v('--unscored'), miss: v('--miss'), font: v('--font'),
+      stripe: v('--stripe'), unscored: v('--unscored'), miss: v('--miss'), font: v('--font'), mono: v('--mono'),
       lane: v('--lane'), highlight: v('--highlight'),
     };
   }
@@ -237,6 +237,7 @@ export class Timeline {
       else if (row.kind === 'err') {
         if (row.unscored) this._drawSegs(ctx, row.unscored, row.y, row.h, th.unscored, 1);
         this._drawSegs(ctx, row.segs, row.y + 2, row.h - 4, th.v(row.colorVar), 0.9);
+        if (row.numbers) this._drawDurations(ctx, row.segs, row.y + 2, row.h - 4, row.colorVar, th);
       }
       ctx.restore();
     }
@@ -295,6 +296,22 @@ export class Timeline {
       ctx.fillText(ellipsize(ctx, track.label || '', GUTTER - x - 8), x, mid);
     });
     ctx.font = `12px ${th.font}`;
+  }
+
+  // The length in seconds inside every mark wide enough to hold it ("0.42 s"); dark text on the light amber.
+  _drawDurations(ctx, segs, y, h, colorVar, th) {
+    if (h < 10) return;
+    const [a, b] = this.view;
+    ctx.save();
+    ctx.font = `${Math.min(11, Math.floor(h - 2))}px ${th.mono}`;
+    ctx.fillStyle = colorVar === '--fa' ? '#1f2937' : '#fff';
+    ctx.textAlign = 'center';
+    for (const [s, e] of segs) {
+      if (e < a || s > b) continue;
+      const x0 = this.timeToX(Math.max(s, a)), x1 = this.timeToX(Math.min(e, b)), text = `${(e - s).toFixed(2)} s`;
+      if (x1 - x0 >= ctx.measureText(text).width + 6) ctx.fillText(text, (x0 + x1) / 2, y + h / 2 + 0.5);
+    }
+    ctx.restore();
   }
 
   _drawSegs(ctx, segs, y, h, color, alpha) {
@@ -357,6 +374,7 @@ export class Timeline {
     if (row.unscored) this._drawSegs(ctx, row.unscored, top, h, th.unscored, 1);
     row.tracks.forEach((track, i) => {
       this._drawSegs(ctx, track.segs, top + i * th1 + 0.5, Math.max(1, th1 - 1), track.color || th.v(track.colorVar), 0.95);
+      if (track.numbers) this._drawDurations(ctx, track.segs, top + i * th1 + 0.5, th1 - 1, track.colorVar, th);
     });
     if (row.diff) this._drawDiff(ctx, row, th);  // on top, so the strip along the bottom stays visible
   }
@@ -559,6 +577,7 @@ export class Timeline {
         }
       }
       this.hoverX = e.offsetX >= GUTTER ? e.offsetX : null;
+      if (!d) c.style.cursor = this._errorSegAt(e.offsetX, e.offsetY) ? 'pointer' : '';
       this.redraw = true;
       this._showTooltip(e);
     });
@@ -576,7 +595,9 @@ export class Timeline {
           this.player.play();
         } else if (t - s > 0.01) this.setView(s, t);
       } else if (!d.moved && e.offsetX >= GUTTER) {
-        this.seek(this.xToTime(e.offsetX));
+        const seg = this._errorSegAt(e.offsetX, e.offsetY);  // a click on an error mark plays just that part
+        if (seg) this.playRange(seg[0], seg[1]);
+        else this.seek(this.xToTime(e.offsetX));
       }
       this.redraw = true;
     });
@@ -607,6 +628,21 @@ export class Timeline {
       if (this.loop?.length === 2) { this.player.currentTime = this.loop[0]; this.player.play(); }
     });
     this.player.addEventListener('play', () => { this.follow = true; });
+  }
+
+  // The error mark (missed / false alarm / confusion / overlap lane) under a point, as [start, end], or null.
+  _errorSegAt(x, y) {
+    if (x < GUTTER || !this.duration) return null;
+    const row = this.rows.find((r) => y >= r.y && y < r.y + r.h);
+    let segs = null;
+    if (row?.kind === 'err') segs = row.segs;
+    else if (row?.kind === 'stack' && row.tracks.length && row.tracks.every((t) => t.colorVar)) {  // simple view: one lane
+      const top = row.y + 3, h = (row.h - 6) / row.tracks.length;
+      segs = row.tracks[Math.min(row.tracks.length - 1, Math.max(0, Math.floor((y - top) / h)))].segs;
+    }
+    if (!segs) return null;
+    const t = this.xToTime(x), slack = (3 * (this.view[1] - this.view[0])) / this.plotWidth;  // 3 px, for thin marks
+    return segs.find(([s, e]) => t >= s - slack && t <= e + slack) || null;
   }
 
   _showTooltip(e) {

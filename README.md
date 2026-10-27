@@ -100,7 +100,7 @@ Choose **Folder**, put a folder in **Audio folder** (and optionally in **Referen
   - A bar per set split into missed / false alarm / confusion, and one for **all sets** (the whole folder) below them. **% of speech**: the parts add up to the set's DER.
     **share of error**: each part as a share of that set's error, so the dominant one stands out. Hover a part for its numbers.
   - A table per set (and all sets): DER, missed, false alarm, confusion, JER, the **main error**, mean speakers reference →
-    predicted, how often the speaker count is right / too few / too many, and the share of overlapped reference speech.
+    predicted (green: right, red ▼: too few, amber ▲: too many; the same colors in the file table and the Speakers card), how often the speaker count is right / too few / too many, and the share of overlapped reference speech.
   - Click a set (bar or row) to show only that set; click it again for all sets. Numbers cover the files run so far:
     **Run all sets** runs the rest of every set.
   An RTTM folder is searched the same way, by file name.
@@ -131,6 +131,14 @@ What you get:
     - each reference speaker, with the predicted speaker it was mapped to drawn below in the same color; with **differences** on, that lane is marked red where the reference speaker talks but the prediction misses it and amber where the prediction adds speech the reference does not have (collar excluded);
     - the model's speaker probability, with the onset/offset thresholds as dashed lines;
     - error lanes: missed / false alarm / confusion / reference overlap (gray = inside the collar, not scored);
+  - both: the error lanes say what each error type adds to the DER (`missed · 0.6%`, in % of scored speech, so the three
+    add up to the DER), and every mark wide enough shows its length in seconds (`1.05 s`). The section header shows the
+    sum: `DER 16.63% = (missed 0.00 s + false alarm 1.05 s + confusion 1.44 s) ÷ 15.0 s scored speech`. Scored speech is
+    the reference speech minus the collar around every boundary, so on a short file with many turns and a wide collar a
+    few seconds of error can be a large DER;
+  - both: an **Overlap** lane, where 2+ speakers talk at once: the real overlap (REF, from the reference) on top and the
+    model's (PRED) below, each with its total seconds; with **differences** on, red where the model misses real overlap and
+    amber where it predicts overlap that is not there. Click a part to play it;
   - both: **lanes S / M / L / XL** sets the height of the speaker and error lanes, an overview strip with every error position, and **Speakers** chips above the timeline: click to hide / show a speaker, double-click to show only that one, **all** to show everyone.
 
   ![Timeline, detailed view: who speaks when, each reference speaker with the model's probability for its matched speaker, and one lane per error type](docs/images/timeline-detailed.png)
@@ -150,7 +158,7 @@ What you get:
 repeats A → B until you press it a third time. **Alt+drag** on the timeline loops the dragged region, and ↻ on an error row
 loops that error (0.3 s on each side). The loop shows as a shaded band with A / B markers; opening another file clears it.
 
-Mouse: wheel = zoom, drag or shift+wheel = pan, ctrl+wheel = scroll the page up / down (to reach the lanes below when there are many speakers), click = seek, shift+drag = zoom to a region, double-click = fit.
+Mouse: click on an error mark (missed / false alarm / confusion lane) = play just that part, wheel = zoom, drag or shift+wheel = pan, ctrl+wheel = scroll the page up / down (to reach the lanes below when there are many speakers), click = seek, shift+drag = zoom to a region, double-click = fit.
 Keys: `[` `]` previous / next file, `space` play, `Home` play from the start, `l` A–B loop, `←` `→` seek 5 s (`shift` + `←` `→` pan), `m` mute, `f` full screen (metrics, timeline, error list and speakers table; `Esc` leaves), `+` `−` zoom, `0` fit, `n` / `p` next / previous error.
 
 ## Scoring
