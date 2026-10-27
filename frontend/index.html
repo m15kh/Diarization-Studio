@@ -32,39 +32,47 @@
           <div id="model-info" class="hint"></div>
         </div>
 
+        <div class="field">
+          <label>Test</label>
+          <div class="seg" id="mode">
+            <button class="btn" data-mode="file" title="One audio file, with its reference / prediction RTTM">Single audio</button>
+            <button class="btn" data-mode="folder" title="A folder of audio files (or a dataset folder holding wav/ + rttm/), one file at a time">Folder</button>
+          </div>
+        </div>
+
         <div class="field" data-drop="audio">
-          <label for="audio">Audio <small>a file, or a folder to run every file in it · server path, browse, upload, or drop a file</small></label>
+          <label for="audio"><span data-text="audio"></span> <small data-text="audio-hint"></small></label>
           <div class="row">
-            <input id="audio" placeholder="/path/to/audio.wav or /path/to/wav_folder" spellcheck="false" autocomplete="off">
+            <input id="audio" spellcheck="false" autocomplete="off">
             <button class="btn icon" data-clear="audio" title="Clear this field">✕</button>
             <button class="btn" data-browse="audio">Browse</button>
-            <button class="btn" data-upload="audio">Upload</button>
-            <select id="upload-rate" title="Sample rate of the WAV an uploaded file is converted to (mp3, m4a, ... are always converted to WAV)">
+            <button class="btn file-only" data-upload="audio">Upload</button>
+            <select id="upload-rate" class="file-only" title="Sample rate of the WAV an uploaded file is converted to (mp3, m4a, ... are always converted to WAV)">
               <option value="0">original rate</option><option value="8000">8 kHz</option><option value="16000">16 kHz</option>
               <option value="22050">22.05 kHz</option><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option>
             </select>
-            <button class="btn icon" id="prev-file" title="Previous file in this folder (runs it)">◀</button>
-            <button class="btn icon" id="next-file" title="Next file in this folder (runs it)">▶</button>
+            <button class="btn icon" id="prev-file" title="Previous file in this folder (runs it) · [">◀</button>
+            <button class="btn icon" id="next-file" title="Next file in this folder (runs it) · ]">▶</button>
           </div>
         </div>
 
         <div class="field" data-drop="ref">
-          <label for="ref">Reference RTTM <small>optional · ground truth, shows the errors · file or folder</small></label>
+          <label for="ref"><span data-text="ref"></span> <small data-text="ref-hint"></small></label>
           <div class="row">
-            <input id="ref" placeholder="found automatically next to the audio, or ../rttm/" spellcheck="false" autocomplete="off">
+            <input id="ref" spellcheck="false" autocomplete="off">
             <button class="btn icon" data-clear="ref" title="Clear this field">✕</button>
             <button class="btn" data-browse="ref">Browse</button>
-            <button class="btn" data-upload="ref">Upload</button>
+            <button class="btn file-only" data-upload="ref">Upload</button>
           </div>
         </div>
 
         <div class="field" data-drop="hyp">
-          <label for="hyp">Prediction RTTM <small>optional · inspect an existing output instead of running the model · file or folder</small></label>
+          <label for="hyp"><span data-text="hyp"></span> <small data-text="hyp-hint"></small></label>
           <div class="row">
-            <input id="hyp" placeholder="leave empty to run the checkpoint" spellcheck="false" autocomplete="off">
+            <input id="hyp" spellcheck="false" autocomplete="off">
             <button class="btn icon" data-clear="hyp" title="Clear this field">✕</button>
             <button class="btn" data-browse="hyp">Browse</button>
-            <button class="btn" data-upload="hyp">Upload</button>
+            <button class="btn file-only" data-upload="hyp">Upload</button>
           </div>
         </div>
 
@@ -84,6 +92,7 @@
           <button class="btn small" id="copy-yaml" title="Copy as a NeMo postprocessing_yaml">Copy YAML</button>
           <button class="btn small" id="load-yaml" title="Load the values from a NeMo postprocessing_yaml (or drop a .yaml file on the page)">Load YAML</button>
           <input type="file" id="yaml-input" accept=".yaml,.yml" hidden>
+          <select id="yaml-history" class="small" title="Re-apply a YAML loaded earlier" hidden></select>
         </div>
       </section>
     </div>
@@ -95,16 +104,22 @@
         <button class="btn small" data-fsort="der" title="Worst first">DER</button>
       </div>
       <div class="toolbar">
+        <button id="folder-first" class="btn" title="Open the first file of the folder">⏮ first</button>
+        <button id="folder-prev" class="btn icon" title="Previous file · [">◀</button>
+        <span id="folder-pos" class="folder-pos"></span>
+        <button id="folder-next" class="btn icon" title="Next file · ]">▶</button>
         <span id="folder-progress" class="muted"></span>
         <span class="grow"></span>
         <button id="folder-stop" class="btn">Stop</button>
+        <button id="folder-all" class="btn" title="Run the files not run yet, for the totals over the whole folder">Run all</button>
         <button id="folder-rerun" class="btn" title="Run every file again, e.g. after changing the checkpoint">Run folder again</button>
         <button id="folder-csv" class="btn" title="One row per file">CSV</button>
         <button id="folder-rttm" class="btn" title="All predictions in one RTTM file">Download RTTM</button>
       </div>
       <div id="folder-metrics" class="metrics"></div>
       <div id="folder-table" class="scroll"></div>
-      <p class="hint">Click a file to inspect it below. Post-processing changes re-score the whole folder.</p>
+      <p class="hint">Only the file you open runs (the next one is prepared in the background). Click a file to inspect it below,
+        <kbd>[</kbd> <kbd>]</kbd> previous / next. The folder reopens at the last file you looked at. Totals cover the files run so far.</p>
     </section>
 
     <section id="results" hidden>

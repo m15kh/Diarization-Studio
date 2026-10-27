@@ -33,6 +33,7 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
 UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints"}
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
+AUDIO_SUBDIRS = ("wav", "wavs", "audio")  # audio folders of a dataset (test/spk2/wav/): not part of a file's group
 EXTENSIONS = {"checkpoint": {".nemo", ".ckpt"}, "audio": AUDIO_EXTS, "rttm": {".rttm"}}
 PP_KEYS = {"onset", "offset", "pad_onset", "pad_offset", "min_duration_on", "min_duration_off"}
 CACHE_SIZE = 256  # model outputs kept in memory, so changing thresholds never re-runs the model
@@ -150,37 +151,48 @@ def run(req: RunRequest):
 
 @app.get("/api/folder")
 def folder(audio: str, ref: str = "", hyp: str = ""):
-    """The audio files of a folder, each paired with <name>.rttm from the `ref` / `hyp` folders.
+    """The audio files under a folder, each paired with <name>.rttm from the `ref` / `hyp` folders.
 
-    A file path for `ref` / `hyp` means its folder. An empty reference is looked up next to
-    each audio file (same folder, ../rttm, ./rttm), like /api/pair does.
+    Sub-folders are searched too, so a whole test set (test/spk2/wav/, test/spk3/wav/, ...) works from its top folder;
+    each file's `group` is the sub-folder it came from (spk2, without a trailing wav/). RTTM folders are searched
+    the same way. A file path for `ref` / `hyp` means its folder. An empty reference is looked up next to each audio
+    file (same folder, ../rttm, ./rttm), like /api/pair does.
     """
     audio_dir = Path(audio).expanduser().absolute()
     if not audio_dir.is_dir():
         raise HTTPException(400, f"Audio folder not found: {audio}")
-    files = sorted((f for f in audio_dir.iterdir() if f.suffix.lower() in AUDIO_EXTS and f.is_file()),
-                   key=lambda f: scoring.natural_key(f.name))
+    files = find_files(audio_dir, AUDIO_EXTS)
     if not files:
-        raise HTTPException(400, f"No audio files in {audio_dir}")
+        raise HTTPException(400, f"No audio files in {audio_dir} or its sub-folders")
 
-    def rttm_dir(path: str, what: str) -> Path | None:
+    def rttm_index(path: str, what: str) -> tuple[Path | None, dict[str, str]]:
         if not path:
-            return None
+            return None, {}
         d = Path(path).expanduser().absolute()
         d = d.parent if d.is_file() else d
         if not d.is_dir():
             raise HTTPException(400, f"{what} folder not found: {path}")
-        return d
+        index: dict[str, str] = {}
+        for f in find_files(d, {".rttm"}):
+            index.setdefault(f.stem, str(f))  # the same name twice: the first in sort order wins
+        return d, index
 
-    ref_dir, hyp_dir = rttm_dir(ref, "Reference RTTM"), rttm_dir(hyp, "Prediction RTTM")
-    find = lambda d, stem: str(d / f"{stem}.rttm") if (d / f"{stem}.rttm").is_file() else ""
+    ref_dir, refs = rttm_index(ref, "Reference RTTM")
+    hyp_dir, hyps = rttm_index(hyp, "Prediction RTTM")
+
+    def group(f: Path) -> str:
+        parts = f.parent.relative_to(audio_dir).parts
+        if parts and parts[-1].lower() in AUDIO_SUBDIRS:
+            parts = parts[:-1]
+        return "/".join(parts)
+
     return {
         "path": str(audio_dir),
         "ref_dir": str(ref_dir or ""),
         "hyp_dir": str(hyp_dir or ""),
-        "files": [{"audio": str(f),
-                   "ref": find(ref_dir, f.stem) if ref_dir else pair(str(f))["ref"],
-                   "hyp": find(hyp_dir, f.stem) if hyp_dir else ""} for f in files],
+        "files": [{"audio": str(f), "name": str(f.relative_to(audio_dir)), "group": group(f),
+                   "ref": refs.get(f.stem, "") if ref_dir else pair(str(f))["ref"],
+                   "hyp": hyps.get(f.stem, "")} for f in files],
     }
 
 
@@ -213,8 +225,7 @@ def neighbor(path: str, step: int = 1):
     current = Path(path).expanduser().absolute()
     if not current.parent.is_dir():
         return {"path": ""}
-    files = sorted((f for f in current.parent.iterdir() if f.suffix.lower() in AUDIO_EXTS and f.is_file()),
-                   key=lambda f: scoring.natural_key(f.name))
+    files = audio_files(current.parent)
     names = [f.name for f in files]
     index = names.index(current.name) + step if current.name in names else 0
     return {"path": str(files[index]) if 0 <= index < len(files) else ""}
@@ -332,6 +343,30 @@ def infer(model, audio: str) -> dict:
     while len(cache) > CACHE_SIZE:
         cache.popitem(last=False)
     return {**cache[key], "cached": False}
+
+
+def audio_files(folder: Path) -> list[Path]:
+    """The audio files in a folder, in natural sort order ([] when it is not a folder)."""
+    if not folder.is_dir():
+        return []
+    return sorted((f for f in folder.iterdir() if f.suffix.lower() in AUDIO_EXTS and f.is_file()),
+                  key=lambda f: scoring.natural_key(f.name))
+
+
+def find_files(folder: Path, exts: set[str], limit: int = 50000) -> list[Path]:
+    """Files with one of `exts` in a folder and its sub-folders (hidden ones skipped), in natural order of their paths."""
+    found, seen = [], set()
+    for root, dirs, names in os.walk(folder, followlinks=True):
+        real = os.path.realpath(root)
+        if real in seen:  # a symlink loop, or a folder linked twice
+            dirs[:] = []
+            continue
+        seen.add(real)
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        found += [Path(root, n) for n in names if Path(n).suffix.lower() in exts and not n.startswith(".")]
+        if len(found) > limit:
+            raise HTTPException(400, f"More than {limit} files under {folder}: choose a smaller folder")
+    return sorted(found, key=lambda f: scoring.natural_key(str(f.relative_to(folder))))
 
 
 def existing(path: str, what: str) -> str:

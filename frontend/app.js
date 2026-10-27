@@ -25,9 +25,25 @@ const PP_KEYS = SETTINGS.slice(0, 6).map((s) => s.key);
 
 const FIELDS = {
   checkpoint: { kind: 'checkpoint', title: 'a checkpoint (.nemo / .ckpt)' },
-  audio: { kind: 'audio', title: 'an audio file or folder' },
-  ref: { kind: 'rttm', title: 'the reference RTTM (file or folder)' },
-  hyp: { kind: 'rttm', title: 'a prediction RTTM (file or folder)' },
+  audio: { kind: 'audio', title: 'an audio file' },
+  ref: { kind: 'rttm', title: 'the reference RTTM' },
+  hyp: { kind: 'rttm', title: 'a prediction RTTM' },
+};
+
+// What the input fields say in each mode ('file': one audio file, 'folder': a folder of them)
+const MODES = {
+  file: {
+    audio: 'Audio', 'audio-hint': 'one file · server path, browse, upload, or drop a file',
+    ref: 'Reference RTTM', 'ref-hint': 'optional · ground truth, shows the errors · found next to the audio or in ../rttm/',
+    hyp: 'Prediction RTTM', 'hyp-hint': 'optional · inspect an existing output instead of running the model',
+    placeholders: { audio: '/path/to/audio.wav', ref: 'found automatically next to the audio, or ../rttm/', hyp: 'leave empty to run the checkpoint' },
+  },
+  folder: {
+    audio: 'Audio folder', 'audio-hint': 'sub-folders included: a whole test set (test/ with spk2/wav/, spk3/wav/, ...) works · opened one file at a time',
+    ref: 'Reference RTTM folder', 'ref-hint': 'optional · <name>.rttm for each <name>.wav, sub-folders included · found in rttm/ next to wav/',
+    hyp: 'Prediction RTTM folder', 'hyp-hint': 'optional · existing outputs to inspect instead of running the model',
+    placeholders: { audio: '/path/to/test or /path/to/test/spk2', ref: 'found automatically in ../rttm/', hyp: 'leave empty to run the checkpoint' },
+  },
 };
 
 const store = {
@@ -46,6 +62,7 @@ const timeline = new Timeline({
 
 let result = null;      // last /api/run response
 let view = null;        // colors and per-speaker segments derived from `result`
+let mode = 'file';      // 'file' or 'folder', see setMode
 let laneSize = store.get('laneSize', '1.6');     // height multiplier of the speaker / error lanes
 let viewMode = store.get('viewMode', 'simple');  // timeline layout: 'simple' or 'detailed'
 const hiddenSpeakers = new Set(store.get('hiddenSpeakers', []));  // speaker keys ('ref:name' / 'hyp:name') not drawn
@@ -54,7 +71,8 @@ let lastAudio = '';     // audio path the RTTM fields were last paired with
 let pairing = Promise.resolve();
 let modelPath = '';
 let runSeq = 0;
-let batch = null;       // folder run: { path, ref_dir, hyp_dir, fields, checkpoint, rows: [{ audio, ref, hyp, res?, error? }] }
+let shown = null;       // { audio, ref, hyp } of `result`, re-scored when the settings change
+let batch = null;       // folder: { path, ref_dir, hyp_dir, fields, checkpoint, active, rows: [{ audio, name, group, ref, hyp, res?, error? }] }
 let batchSeq = 0;
 let folderSort = 'name';
 let errorSort = 'time';
@@ -64,6 +82,7 @@ let rescoreTimer = null;
 let statusTimer = null;
 
 renderSettings();
+renderYamlHistory();
 restore();
 bindInputs();
 bindResults();
@@ -98,6 +117,8 @@ async function initServer() {
       showModel(info);
     }
     if (paths.audio && (val('checkpoint') || val('hyp'))) run();
+    // a folder reopens at the file looked at last, when nothing has to load first
+    else if (mode === 'folder' && val('audio') && (val('hyp') || (info && val('checkpoint') === info.path))) run();
     else if (Object.keys(paths).length) setStatus('Paths set from the terminal');
   } catch { /* server not reachable yet */ }
 }
@@ -105,6 +126,7 @@ async function initServer() {
 function applyPaths(paths) {
   if (!Object.keys(paths).length) return;
   if (paths.audio) {
+    setMode(isFolder(paths.audio) ? 'folder' : 'file');
     // a new audio file: RTTMs not given in the terminal must not stay from the previous file
     for (const k of ['audio', 'ref', 'hyp']) setVal(k, paths[k] || '');
     lastAudio = paths.audio;
@@ -130,12 +152,39 @@ async function loadModel() {
 }
 
 function run() {
-  return isFolder(val('audio')) ? runFolder() : runFile();
+  const audio = val('audio');
+  if (audio && isFolder(audio) !== (mode === 'folder')) {
+    return showError(mode === 'folder'
+      ? 'This is an audio file. Choose Single audio above, or give the folder it is in.'
+      : 'This is a folder. Choose Folder above to step through its files.');
+  }
+  return mode === 'folder' ? runFolder() : runFile();
 }
 
-async function runFile() {
+// Switch between testing one audio file and a folder. Each mode keeps its own audio / RTTM paths.
+function setMode(next) {
+  if (next !== mode) {
+    save();
+    mode = next;
+    const paths = store.get(`paths.${mode}`, {});
+    for (const k of ['audio', 'ref', 'hyp']) setVal(k, paths[k] || '');
+    lastAudio = val('audio');
+    store.set('mode', mode);
+    hideError();
+  }
+  document.body.dataset.mode = mode;
+  for (const b of document.querySelectorAll('[data-mode]')) b.classList.toggle('on', b.dataset.mode === mode);
+  for (const el of document.querySelectorAll('[data-text]')) el.textContent = MODES[mode][el.dataset.text];
+  for (const [k, text] of Object.entries(MODES[mode].placeholders)) $(`#${k}`).placeholder = text;
+  $('#prev-file').title = mode === 'folder' ? 'Previous file of the folder · [' : 'Previous file in this folder (runs it) · [';
+  $('#next-file').title = mode === 'folder' ? 'Next file of the folder · ]' : 'Next file in this folder (runs it) · ]';
+  if (batch) renderFolder();
+}
+
+// Run one file and show it; returns the result, or null when it failed or a newer run replaced it.
+async function runFile(paths = { audio: val('audio'), ref: val('ref'), hyp: val('hyp') }) {
   clearTimeout(rescoreTimer);
-  const body = { audio: val('audio'), checkpoint: val('checkpoint'), ref_rttm: val('ref'), hyp_rttm: val('hyp'), ...getSettings() };
+  const body = { audio: paths.audio, checkpoint: val('checkpoint'), ref_rttm: paths.ref, hyp_rttm: paths.hyp, ...getSettings() };
   if (!body.audio) return showError('Choose an audio file.');
   if (!body.checkpoint && !body.hyp_rttm) return showError('Choose a checkpoint, or a prediction RTTM to inspect.');
   const seq = ++runSeq;
@@ -143,29 +192,31 @@ async function runFile() {
   setStatus(loading ? 'Loading model and running…' : 'Running…', true);
   try {
     const res = await api('/api/run', body);
-    if (seq !== runSeq) return;  // a newer request replaced this one
+    if (seq !== runSeq) return null;  // a newer request replaced this one
+    shown = paths;
     showResult(res);
     setStatus(res.source === 'model'
       ? `Done · inference ${res.infer_time.toFixed(2)} s${res.cached ? ' (cached)' : ''}`
       : 'Done · prediction from RTTM');
+    return res;
   } catch (e) {
-    if (seq !== runSeq) return;
-    setStatus('');
-    showError(e);
+    if (seq === runSeq) { setStatus(''); showError(e); }
+    return null;
   }
 }
 
 function scheduleRescore() {
   clearTimeout(rescoreTimer);
   rescoreTimer = setTimeout(() => {
-    if (result && !isFolder(val('audio'))) runFile();
-    if (batch?.rows.some((r) => r.res)) scoreFolder(++batchSeq, !batch.running);  // a stopped run stays stopped
+    if (result && shown) runFile(shown).then((res) => { if (res) keepInFolder(res); });
+    if (mode === 'folder' && batch?.rows.some((r) => r.res)) scoreFolder(++batchSeq, batch.running ? 'all' : 'done');  // a stopped run stays stopped
   }, 250);
 }
 
 // ---- folder -------------------------------------------------------------------------------
 
-// Run every audio file of a folder, one after the other; RTTMs are paired by file name (see /api/folder).
+// Open a folder: list its audio files (RTTMs paired by file name, see /api/folder) and run only the file
+// looked at last time in this folder, or the first one. "Run all" runs the rest for the totals.
 async function runFolder() {
   const fields = { audio: val('audio'), ref: val('ref'), hyp: val('hyp') };
   const checkpoint = val('checkpoint');
@@ -178,19 +229,20 @@ async function runFolder() {
     if (seq !== batchSeq) return;
     hideError();
     batch = { ...list, fields, checkpoint, rows: list.files.map((f) => ({ ...f })) };
-    result = null;
-    $('#results').hidden = true;
-    scoreFolder(seq);
+    const last = store.get('folderPos', {})[batch.path];
+    const start = Math.max(0, batch.rows.findIndex((r) => r.name === last));
+    await openFolderFile(start);
+    if (start > 0) setStatus(`Resumed at ${last} (${start + 1} / ${batch.rows.length}) · ⏮ first starts over`);
   } catch (e) {
     if (seq === batchSeq) showError(e);
   }
 }
 
-// (Re-)score the files with the current settings; `onlyDone`: just the ones that have a result.
-// Model outputs are cached, so a re-score is quick.
-async function scoreFolder(seq, onlyDone = false) {
+// (Re-)score the files with the current settings: 'all', 'done' (the ones that have a result) or 'missing'
+// (the ones that do not). Model outputs are cached, so a re-score is quick.
+async function scoreFolder(seq, which = 'all') {
   const b = batch;
-  const todo = onlyDone ? b.rows.filter((r) => r.res) : b.rows;
+  const todo = which === 'all' ? b.rows : b.rows.filter((r) => Boolean(r.res) === (which === 'done'));
   Object.assign(b, { running: true, stopped: false, done: 0, total: todo.length });
   for (const row of todo) {
     b.current = row;
@@ -221,16 +273,21 @@ function stopFolder() {
 
 function renderFolder() {
   const b = batch;
-  $('#folder').hidden = !b;
+  $('#folder').hidden = !b || mode !== 'folder';
   if (!b) return;
   const n = b.rows.length;
   const done = b.rows.filter((r) => r.res);
   const scored = done.filter((r) => r.res.score);
   const failed = b.rows.filter((r) => r.error).length;
   $('#folder-count').textContent = `${n}`;
+  const open = b.rows[b.active];
+  $('#folder-pos').textContent = open ? `${b.active + 1} / ${n} · ${open.group ? `${open.group} · ` : ''}${basename(open.audio)}` : '';
+  $('#folder-first').disabled = $('#folder-prev').disabled = !b.active;
+  $('#folder-next').disabled = b.active == null || b.active >= n - 1;
   $('#folder-progress').innerHTML = `${b.running ? '<span class="spinner"></span>' : ''}${esc(b.path)}${
-    b.running ? ` · ${b.done} / ${b.total}` : b.stopped ? ` · stopped at ${b.done} / ${b.total}` : ''}`;
+    b.running ? ` · running ${b.done} / ${b.total}` : b.stopped ? ` · stopped at ${b.done} / ${b.total}` : ''}`;
   $('#folder-stop').hidden = !b.running;
+  $('#folder-all').hidden = b.running || done.length + failed >= n;
 
   // totals: DER over all scored speech (time-weighted), like NeMo / pyannote report it
   const sum = (rows, f) => rows.reduce((acc, r) => acc + f(r.res), 0);
@@ -258,15 +315,17 @@ function renderFolder() {
   const hasRef = b.rows.some((r) => r.ref);
   const order = b.rows.map((_, i) => i);
   if (folderSort === 'der') order.sort((i, j) => (b.rows[j].res?.score?.der ?? -1) - (b.rows[i].res?.score?.der ?? -1));
-  const head = ['file', 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion', 'JER'] : ['speech', 'overlap']), 'inference'];
+  const hasGroup = b.rows.some((r) => r.group);
+  const head = ['file', ...(hasGroup ? ['set'] : []), 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion', 'JER'] : ['speech', 'overlap']), 'inference'];
   const body = order.map((i) => {
     const r = b.rows[i], res = r.res, s = res?.score;
     const cls = i === b.active ? ' class="active"' : '';
-    const first = `<td title="${esc(r.audio)}">${esc(basename(r.audio))}</td>`;
-    if (r.error) return `<tr data-f="${i}"${cls}>${first}<td class="fail" colspan="${head.length - 1}">${esc(r.error)}</td></tr>`;
+    const lead = hasGroup ? 2 : 1;
+    const first = `<td title="${esc(r.audio)}">${esc(basename(r.audio))}</td>${hasGroup ? `<td>${esc(r.group)}</td>` : ''}`;
+    if (r.error) return `<tr data-f="${i}"${cls}>${first}<td class="fail" colspan="${head.length - lead}">${esc(r.error)}</td></tr>`;
     if (!res) {
       const wait = r === b.current ? '<span class="spinner"></span>' : '';
-      return `<tr data-f="${i}"${cls}>${first}${'<td class="num">–</td>'.repeat(head.length - 2)}<td class="num">${wait}</td></tr>`;
+      return `<tr data-f="${i}"${cls}>${first}${'<td class="num">–</td>'.repeat(head.length - lead - 1)}<td class="num">${wait}</td></tr>`;
     }
     const spk = res.ref
       ? `<span class="${res.ref.speakers !== res.hyp.speakers ? 'warn' : ''}">${res.ref.speakers} → ${res.hyp.speakers}</span>`
@@ -280,27 +339,74 @@ function renderFolder() {
       ${nums.map((x) => `<td class="num">${x}</td>`).join('')}<td class="num">${infer}</td></tr>`;
   });
   $('#folder-table').innerHTML = `<table class="table">
-    <thead><tr>${head.map((h, k) => `<th${k ? ' class="num"' : ''}>${h}</th>`).join('')}</tr></thead>
+    <thead><tr>${head.map((h, k) => `<th${k && h !== 'set' ? ' class="num"' : ''}>${h}</th>`).join('')}</tr></thead>
     <tbody>${body.join('')}</tbody></table>`;
+  // keep the open file in view inside the table (scrollIntoView would also scroll the page)
+  const box = $('#folder-table'), tr = box.querySelector('tr.active');
+  if (tr && b.inView !== b.active) {
+    b.inView = b.active;
+    if (tr.offsetTop < box.scrollTop + tr.offsetHeight || tr.offsetTop + tr.offsetHeight > box.scrollTop + box.clientHeight) {
+      box.scrollTop = tr.offsetTop - box.clientHeight / 2;
+    }
+  }
 }
 
-// Open one file of the folder in the inspector below.
-async function openFolderFile(i) {
-  const r = batch.rows[i];
-  batch.active = i;
+const FOLDER_MEMORY = 50;  // folders whose last opened file is remembered
+
+// Open one file of the folder in the inspector below, remember it for the next visit, and prepare the next file.
+async function openFolderFile(i, scroll = false) {
+  const b = batch, r = b.rows[i];
+  if (!r) return;
+  b.active = i;
   renderFolder();
-  for (const k of ['audio', 'ref', 'hyp']) setVal(k, r[k]);
-  lastAudio = r.audio;
-  save();
-  await runFile();
-  if (result?.audio === r.audio) $('#results').scrollIntoView({ behavior: 'smooth' });
+  const positions = Object.entries(store.get('folderPos', {})).filter(([path]) => path !== b.path);
+  store.set('folderPos', Object.fromEntries([[b.path, r.name], ...positions].slice(0, FOLDER_MEMORY)));
+  if (b.hyp_dir && !r.hyp) return showError(`No ${basename(r.audio).replace(/\.[^.]*$/, '')}.rttm in the prediction folder`);
+  const res = await runFile(r);
+  if (!res || batch !== b) return;
+  keepInFolder(res);
+  if (scroll) $('#results').scrollIntoView({ behavior: 'smooth' });
+  prefetch(b, i + 1);
+}
+
+// A file's numbers for the folder table, like the server's `brief` result.
+function keepInFolder(res) {
+  const row = batch?.rows.find((r) => r.audio === res.audio);
+  if (!row) return;
+  const without = (o, keys) => o && Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)));
+  row.res = { ...without(res, ['probs']), hyp: without(res.hyp, ['segments']), ref: without(res.ref, ['segments']),
+              score: without(res.score, ['lanes', 'regions', 'speakers']) };
+  row.error = '';
+  renderFolder();
+}
+
+// Run the model on a file in the background, so it opens at once (its output is cached on the server).
+async function prefetch(b, i) {
+  const r = b.rows[i];
+  if (!r || r.res || r.hyp || b.hyp_dir || b.running || !b.checkpoint) return;
+  const settings = getSettings();
+  try {
+    const res = await api('/api/run', { audio: r.audio, checkpoint: b.checkpoint, ref_rttm: r.ref, ...settings, brief: true });
+    // settings changed meanwhile: the numbers are stale, but the model output is cached all the same
+    if (batch === b && !r.res && JSON.stringify(settings) === JSON.stringify(getSettings())) {
+      Object.assign(r, { res, error: '' });
+      renderFolder();
+    }
+  } catch { /* the error shows when the file is opened */ }
+}
+
+function stepFolder(step) {
+  const i = (batch.active ?? -1) + step;
+  if (i < 0 || i >= batch.rows.length) return setStatus(step > 0 ? 'Last file in this folder' : 'First file in this folder');
+  openFolderFile(i);
 }
 
 function rerunFolder() {
   for (const k of ['audio', 'ref', 'hyp']) setVal(k, batch.fields[k]);
   lastAudio = batch.fields.audio;
+  batch.checkpoint = val('checkpoint');
   save();
-  runFolder();
+  scoreFolder(++batchSeq, 'all');
 }
 
 function downloadFolder(kind) {
@@ -309,10 +415,10 @@ function downloadFolder(kind) {
     download(`${name}.rttm`, batch.rows.map((r) => r.res?.rttm || '').join(''), 'text/plain');
     return;
   }
-  const cols = ['file', 'duration_s', 'ref_speakers', 'pred_speakers', 'der', 'miss', 'fa', 'conf', 'jer', 'ref_speech_s', 'infer_s', 'error'];
+  const cols = ['file', 'group', 'duration_s', 'ref_speakers', 'pred_speakers', 'der', 'miss', 'fa', 'conf', 'jer', 'ref_speech_s', 'infer_s', 'error'];
   const cell = (x) => (x == null ? '' : /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : String(x));
-  const lines = batch.rows.map(({ audio, res, error }) => [
-    basename(audio), res?.duration, res?.ref?.speakers, res?.hyp.speakers, res?.score?.der, res?.score?.miss,
+  const lines = batch.rows.map(({ audio, group, res, error }) => [
+    basename(audio), group, res?.duration, res?.ref?.speakers, res?.hyp.speakers, res?.score?.der, res?.score?.miss,
     res?.score?.fa, res?.score?.conf, res?.score?.jer, res?.score?.ref_speech, res?.source === 'model' ? res.infer_time : null, error,
   ].map(cell).join(','));
   download(`${name}.csv`, [cols.join(','), ...lines].join('\n') + '\n', 'text/csv');
@@ -765,7 +871,7 @@ function setVal(field, value) { $(`#${field}`).value = value; }
 // Returns the pending lookup, so callers (Run, Enter, blur) all wait for the same one.
 function audioChanged() {
   const audio = val('audio');
-  if (isFolder(audio)) {
+  if (mode === 'folder') {
     lastAudio = audio;
     save();
   } else if (audio && audio !== lastAudio) {
@@ -786,6 +892,8 @@ function audioChanged() {
 async function stepAudio(step) {
   const current = val('audio');
   if (!current) return;
+  if (batch && batch.fields.audio === current) return stepFolder(step);
+  if (mode === 'folder') return run();
   try {
     const { path } = await api(`/api/neighbor?${new URLSearchParams({ path: current, step })}`);
     if (!path) return setStatus(step > 0 ? 'Last file in this folder' : 'First file in this folder');
@@ -814,6 +922,7 @@ function withTimeout(promise, ms, message, onTimeout) {
 }
 
 async function uploadFile(field, file) {
+  if (field !== 'checkpoint') setMode('file');  // uploads are single files
   setStatus(`Uploading ${file.name}…`, true);
   try {
     // read the file first, so a file the browser cannot read gives its own error instead of a stalled request
@@ -926,6 +1035,7 @@ function bindInputs() {
       run();
     });
   }
+  for (const b of document.querySelectorAll('[data-mode]')) b.addEventListener('click', () => setMode(b.dataset.mode));
   $('#load-btn').addEventListener('click', loadModel);
   $('#run-btn').addEventListener('click', async () => { await audioChanged(); run(); });
   $('#prev-file').addEventListener('click', () => stepAudio(-1));
@@ -937,14 +1047,29 @@ function bindInputs() {
     if (e.target.files[0]) loadYaml(e.target.files[0]);
     e.target.value = '';
   });
+  $('#yaml-history').addEventListener('change', (e) => {
+    const i = e.target.value;
+    e.target.value = '';
+    if (i === 'clear') { store.set('yamlHistory', []); renderYamlHistory(); return; }
+    const entry = store.get('yamlHistory', [])[Number(i)];
+    if (!entry) return;
+    setSettings({ ...getSettings(), ...entry.values });
+    save();
+    scheduleRescore();
+    setStatus(`Applied ${entry.name}`);
+  });
 
   $('#folder-stop').addEventListener('click', stopFolder);
+  $('#folder-all').addEventListener('click', () => { batch.checkpoint = val('checkpoint'); scoreFolder(++batchSeq, 'missing'); });
+  $('#folder-first').addEventListener('click', () => openFolderFile(0));
+  $('#folder-prev').addEventListener('click', () => stepFolder(-1));
+  $('#folder-next').addEventListener('click', () => stepFolder(1));
   $('#folder-rerun').addEventListener('click', rerunFolder);
   $('#folder-csv').addEventListener('click', () => downloadFolder('csv'));
   $('#folder-rttm').addEventListener('click', () => downloadFolder('rttm'));
   $('#folder-table').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-f]');
-    if (tr) openFolderFile(Number(tr.dataset.f));
+    if (tr) openFolderFile(Number(tr.dataset.f), true);
   });
   for (const btn of document.querySelectorAll('[data-fsort]')) {
     btn.addEventListener('click', () => {
@@ -958,7 +1083,7 @@ function bindInputs() {
   $('#br-list').addEventListener('click', (e) => {
     const li = e.target.closest('li');
     if (li?.dataset.dir) listDir(li.dataset.dir);
-    else if (li?.dataset.file) closePicker(li.dataset.file);
+    else if (li?.dataset.file) closePicker(picker.folders ? $('#br-path').value : li.dataset.file, picker.folders);
   });
   $('#br-path').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); listDir($('#br-path').value); }
@@ -970,9 +1095,11 @@ function bindInputs() {
 
 function pickFile(field) {
   return new Promise((resolve) => {
-    picker = { field, kind: FIELDS[field].kind, resolve };
-    $('#br-title').textContent = `Select ${FIELDS[field].title}`;
-    $('#br-use-dir').hidden = field === 'checkpoint';
+    const folders = mode === 'folder' && field !== 'checkpoint';  // a file then means its folder
+    picker = { field, kind: FIELDS[field].kind, resolve, folders };
+    $('#br-title').textContent = folders ? `Select ${{ audio: 'the audio folder (or a dataset folder holding wav/ + rttm/)', ref: 'the reference RTTM folder', hyp: 'the prediction RTTM folder' }[field]}`
+      : `Select ${FIELDS[field].title}`;
+    $('#br-use-dir').hidden = !folders;
     $('#browser').showModal();
     listDir(val(field) || store.get(`dir.${field}`, '') || store.get('dir.audio', ''));
   });
@@ -1077,10 +1204,35 @@ async function loadYaml(file) {
     setSettings({ ...getSettings(), ...found });
     save();
     scheduleRescore();
+    rememberYaml(file.name, found);
     setStatus(`Loaded ${keys.join(', ')} from ${file.name}`);
   } catch (e) {
     showError(e);
   }
+}
+
+// The last few loaded YAMLs, newest first, so one can be re-applied without uploading it again.
+const YAML_HISTORY_SIZE = 15;
+
+function rememberYaml(name, values) {
+  const same = (e) => e.name === name && JSON.stringify(e.values) === JSON.stringify(values);
+  const history = store.get('yamlHistory', []).filter((e) => !same(e));
+  history.unshift({ name, values, at: Date.now() });
+  store.set('yamlHistory', history.slice(0, YAML_HISTORY_SIZE));
+  renderYamlHistory();
+}
+
+function renderYamlHistory() {
+  const select = $('#yaml-history');
+  const history = store.get('yamlHistory', []);
+  select.hidden = !history.length;
+  select.innerHTML = `<option value="" selected disabled>Previous YAMLs (${history.length})</option>`
+    + history.map((e, i) => {
+      const detail = Object.entries(e.values).map(([k, v]) => `${k}: ${v}`).join('\n');
+      const when = new Date(e.at).toLocaleString();
+      return `<option value="${i}" title="${esc(`${when}\n${detail}`)}">${esc(e.name)} · ${esc(when)}</option>`;
+    }).join('')
+    + '<option value="clear">Clear history</option>';
 }
 
 async function copyYaml() {
@@ -1100,6 +1252,7 @@ async function copyYaml() {
 
 function save() {
   store.set('fields', Object.fromEntries(Object.keys(FIELDS).map((k) => [k, val(k)])));
+  store.set(`paths.${mode}`, Object.fromEntries(['audio', 'ref', 'hyp'].map((k) => [k, val(k)])));
   store.set('settings', getSettings());
 }
 
@@ -1107,6 +1260,8 @@ function restore() {
   const fields = store.get('fields', {});
   for (const k of Object.keys(FIELDS)) setVal(k, fields[k] || '');
   setSettings(store.get('settings', {}));
+  mode = store.get('mode', isFolder(val('audio')) ? 'folder' : 'file');  // before the switch: what the field holds
+  setMode(mode);
   lastAudio = val('audio');
 }
 
@@ -1239,7 +1394,9 @@ const SEEK_STEP = 5;  // seconds the arrow keys jump
 
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
-    if (!result || e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea, dialog')) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea, dialog')) return;
+    if (e.key === '[' || e.key === ']') { e.preventDefault(); stepAudio(e.key === ']' ? 1 : -1); return; }
+    if (!result) return;
     const actions = {
       ' ': togglePlay,
       ArrowLeft: () => (e.shiftKey ? timeline.pan(-0.25) : timeline.seekBy(-SEEK_STEP)),
