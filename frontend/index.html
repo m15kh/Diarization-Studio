@@ -149,6 +149,7 @@
         <div class="toolbar">
           <button id="restart-btn" class="btn icon" title="Play from the start (Home)">⏮</button>
           <button id="play-btn" class="btn icon" title="Play / pause (space)">▶</button>
+          <button id="loop-btn" class="btn">A–B</button>
           <span id="time" class="time">0:00.00 / 0:00.00</span>
           <select id="speed" title="Playback speed">
             <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
@@ -171,7 +172,7 @@
           <button id="prev-err" class="btn" title="Previous error (p)">◀ error</button>
           <button id="next-err" class="btn" title="Next error (n)">error ▶</button>
           <label class="check" id="show-all-wrap"><input type="checkbox" id="show-all"> <span id="show-all-label">silent outputs</span></label>
-          <label class="check" id="show-diar-wrap" title="The 'Diarization · who speaks when' lanes of the Detailed view"><input type="checkbox" id="show-diar" checked> who speaks when</label>
+          <label class="check" id="show-diar-wrap" title="Show or hide the 'Diarization · who speaks when' lanes at the top of the Detailed view"><input type="checkbox" id="show-diar" checked> who speaks when</label>
           <label class="check" id="show-diff-wrap" title="Mark each predicted speaker where it differs from its reference speaker"><input type="checkbox" id="show-diff" checked> differences</label>
           <span class="grow"></span>
           <button id="fullscreen-btn" class="btn icon" title="Full screen (f)">⛶</button>
@@ -185,8 +186,8 @@
           <div id="tooltip" hidden></div>
         </div>
         <p class="hint">
-          wheel: zoom · drag or shift+wheel: pan · click: seek · shift+drag: zoom to region · double-click: fit ·
-          keys: <kbd>space</kbd> play <kbd>Home</kbd> from the start <kbd>←</kbd><kbd>→</kbd> seek 5 s (shift: pan) <kbd>m</kbd> mute <kbd>f</kbd> full screen <kbd>+</kbd><kbd>−</kbd> zoom <kbd>0</kbd> fit
+          wheel: zoom · drag or shift+wheel: pan · ctrl+wheel: scroll up / down · click: seek · shift+drag: zoom to region · alt+drag: loop a region · double-click: fit ·
+          keys: <kbd>space</kbd> play <kbd>Home</kbd> from the start <kbd>l</kbd> A–B loop <kbd>←</kbd><kbd>→</kbd> seek 5 s (shift: pan) <kbd>m</kbd> mute <kbd>f</kbd> full screen <kbd>+</kbd><kbd>−</kbd> zoom <kbd>0</kbd> fit
           <kbd>n</kbd><kbd>p</kbd> next / previous error
         </p>
       </section>

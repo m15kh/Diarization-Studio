@@ -14,8 +14,8 @@ const GUTTER = 150;      // left column for lane labels (px)
 const PAD_RIGHT = 12;
 const MIN_SPAN = 0.05;   // deepest zoom: 50 ms across the plot
 const TICK_STEPS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
-const HEIGHT = { ruler: 22, wave: 100, header: 26, seg: 26, ref: 16, hyp: 28, err: 16, stack: 32 };
-const LANE_KINDS = new Set(['seg', 'ref', 'hyp', 'err', 'stack']);
+const HEIGHT = { ruler: 22, wave: 100, header: 26, seg: 18, ref: 16, hyp: 28, err: 16, stack: 32 };
+const LANE_KINDS = new Set(['ref', 'hyp', 'err', 'stack']);  // grow with `laneScale`; 'seg' (who speaks when) stays compact
 
 export function fmtTime(t, digits = 2) {
   const scale = 10 ** digits;
@@ -25,8 +25,8 @@ export function fmtTime(t, digits = 2) {
 }
 
 export class Timeline {
-  constructor({ canvas, overview, tooltip, player, describe }) {
-    Object.assign(this, { canvas, overview, tooltip, player, describe });
+  constructor({ canvas, overview, tooltip, player, describe, onLoop }) {
+    Object.assign(this, { canvas, overview, tooltip, player, describe, onLoop });
     this.layer = document.createElement('canvas');  // cached static drawing
     this.rows = [];
     this.marks = [];
@@ -39,6 +39,7 @@ export class Timeline {
     this.sel = null;
     this.follow = true;  // during playback, scroll the view along with the cursor
     this.stopAt = null;
+    this.loop = null;    // A–B loop: [a, b], [a] while only A is set, or null
     this.width = 0;
     this.dirty = true;   // static layer must be redrawn
     this.redraw = true;  // composite (cursor, hover, overview) must be redrawn
@@ -49,7 +50,7 @@ export class Timeline {
     requestAnimationFrame(loop);
   }
 
-  // `laneScale` makes the speaker and error lanes taller (the ruler, waveform and headers keep their height).
+  // `laneScale` makes the speaker and error lanes taller (the ruler, waveform, headers and who-speaks-when lanes keep their height).
   setData({ duration, rows, marks, keepView, laneScale = 1 }) {
     const sameLength = Math.abs(duration - this.duration) < 1e-3;
     this.duration = duration;
@@ -120,6 +121,13 @@ export class Timeline {
     if (t < a || t > b) this.setView(t - span * 0.5, t + span * 0.5, true);
   }
 
+  // A–B loop: playback jumps back to A whenever it reaches B.
+  setLoop(loop) {
+    this.loop = loop;
+    this.redraw = true;
+    this.onLoop?.(loop);
+  }
+
   playRange(a, b) {
     if (!this.player.src) return;
     this.player.currentTime = Math.max(0, a);
@@ -164,6 +172,7 @@ export class Timeline {
   _frame() {
     const p = this.player;
     if (!p.paused) {
+      if (this.loop?.length === 2 && p.currentTime >= this.loop[1]) p.currentTime = this.loop[0];
       if (this.stopAt != null && p.currentTime >= this.stopAt) p.pause();
       const [a, b] = this.view;
       const inView = p.currentTime >= a && p.currentTime <= b;
@@ -277,10 +286,12 @@ export class Timeline {
     row.tracks.forEach((track, i) => {
       const mid = top + (i + 0.5) * th1;
       let x = 10;
-      if (i === 0 && row.color) { ctx.fillStyle = row.color; ctx.fillRect(x, mid - 4, 8, 8); }
+      // a track with its own color (the error types) gets its own square; otherwise the row's color marks the first one
+      const swatch = track.colorVar ? th.v(track.colorVar) : i === 0 && row.color;
+      if (swatch) { ctx.fillStyle = swatch; ctx.fillRect(x, mid - 4, 8, 8); }
       x += 14;
       if (track.tag) x = this._drawTag(ctx, track.tag, x, mid, th);
-      ctx.fillStyle = i === 0 ? th.text : th.muted;
+      ctx.fillStyle = i === 0 || track.colorVar ? th.text : th.muted;
       ctx.fillText(ellipsize(ctx, track.label || '', GUTTER - x - 8), x, mid);
     });
     ctx.font = `12px ${th.font}`;
@@ -305,7 +316,7 @@ export class Timeline {
     ctx.fillStyle = th.lane;
     ctx.beginPath(); ctx.roundRect(GUTTER, top, this.plotWidth, h, 5); ctx.fill();
 
-    const pillTop = top + 3, ph = h - 6;
+    const pillTop = top + 2, ph = h - 4;
     ctx.fillStyle = row.color;
     ctx.beginPath();
     for (const [s, e] of row.segs) {
@@ -456,6 +467,26 @@ export class Timeline {
       ctx.fillRect(x0, 0, x1 - x0, this.height);
       ctx.globalAlpha = 1;
     }
+    if (this.loop) {
+      const [la, lb] = this.loop;
+      if (lb != null) {
+        ctx.globalAlpha = 0.1; ctx.fillStyle = th.accent;
+        ctx.fillRect(this.timeToX(la), this.rows[0].y + 14, this.timeToX(lb) - this.timeToX(la), this.height);
+        ctx.globalAlpha = 1;
+      }
+      ctx.setLineDash([4, 3]);
+      ctx.font = `600 10px ${th.font}`;
+      for (const [time, name] of [[la, 'A'], [lb, 'B']]) {
+        if (time == null || time < this.view[0] || time > this.view[1]) continue;
+        const x = Math.round(this.timeToX(time)) + 0.5;
+        line(x, th.accent, 1);
+        ctx.fillStyle = th.accent;
+        ctx.fillRect(x - 6, this.rows[0].y + 1, 12, 12);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(name, x - 3, this.rows[0].y + 7.5);
+      }
+      ctx.setLineDash([]);
+    }
     if (this.hoverX != null) line(Math.round(this.hoverX) + 0.5, th.muted, 1);
     const t = this.player.currentTime;
     if (t >= this.view[0] && t <= this.view[1]) line(this.timeToX(t), th.accent, 2);
@@ -487,6 +518,11 @@ export class Timeline {
     ctx.fillRect(x(a), 0, Math.max(2, x(b) - x(a)), h);
     ctx.globalAlpha = 1; ctx.strokeStyle = th.accent; ctx.lineWidth = 1;
     ctx.strokeRect(x(a) + 0.5, 0.5, Math.max(2, x(b) - x(a)) - 1, h - 1);
+    if (this.loop?.length === 2) {
+      ctx.globalAlpha = 0.35; ctx.fillStyle = th.accent;
+      ctx.fillRect(x(this.loop[0]), h - 10, Math.max(2, x(this.loop[1]) - x(this.loop[0])), 4);
+      ctx.globalAlpha = 1;
+    }
     ctx.fillStyle = th.accent;
     ctx.fillRect(x(this.player.currentTime), 0, 1.5, h);
   }
@@ -500,6 +536,8 @@ export class Timeline {
       e.preventDefault();
       const unit = e.deltaMode === 1 ? 30 : e.deltaMode === 2 ? 300 : 1;
       const dx = e.deltaX * unit, dy = e.deltaY * unit;
+      // ctrl + wheel scrolls the page (or the full-screen view) up and down, to reach the lanes below
+      if (e.ctrlKey || e.metaKey) { (document.fullscreenElement || document.scrollingElement).scrollBy(0, dy); return; }
       if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) this.pan((dx || dy) / this.plotWidth);
       else this.zoom(Math.exp(dy * 0.002), e.offsetX > GUTTER ? this.xToTime(e.offsetX) : undefined);
     }, { passive: false });
@@ -507,13 +545,13 @@ export class Timeline {
     c.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !this.duration) return;
       c.setPointerCapture(e.pointerId);
-      this.drag = { x: e.offsetX, t: this.xToTime(e.offsetX), view: [...this.view], shift: e.shiftKey, moved: false };
+      this.drag = { x: e.offsetX, t: this.xToTime(e.offsetX), view: [...this.view], shift: e.shiftKey, alt: e.altKey, moved: false };
     });
     c.addEventListener('pointermove', (e) => {
       const d = this.drag;
       if (d) {
         if (Math.abs(e.offsetX - d.x) > 3) d.moved = true;
-        if (d.moved && d.shift) this.sel = [d.t, this.xToTime(e.offsetX)];
+        if (d.moved && (d.shift || d.alt)) this.sel = [d.t, this.xToTime(e.offsetX)];
         else if (d.moved) {
           const dt = ((e.offsetX - d.x) / this.plotWidth) * (d.view[1] - d.view[0]);
           this.setView(d.view[0] - dt, d.view[1] - dt);
@@ -532,7 +570,11 @@ export class Timeline {
       if (this.sel) {
         const s = Math.min(...this.sel), t = Math.max(...this.sel);
         this.sel = null;
-        if (t - s > 0.01) this.setView(s, t);
+        if (t - s > 0.01 && d.alt) {  // alt+drag: loop this region
+          this.setLoop([Math.max(0, s), Math.min(this.duration, t)]);
+          this.seek(s);
+          this.player.play();
+        } else if (t - s > 0.01) this.setView(s, t);
       } else if (!d.moved && e.offsetX >= GUTTER) {
         this.seek(this.xToTime(e.offsetX));
       }
@@ -561,6 +603,9 @@ export class Timeline {
     ov.addEventListener('pointerup', () => { this.ovDrag = false; });
 
     this.player.addEventListener('pause', () => { this.stopAt = null; });
+    this.player.addEventListener('ended', () => {  // B at the very end of the file
+      if (this.loop?.length === 2) { this.player.currentTime = this.loop[0]; this.player.play(); }
+    });
     this.player.addEventListener('play', () => { this.follow = true; });
   }
 

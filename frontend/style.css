@@ -144,6 +144,7 @@ body[data-mode="folder"] .file-only { display: none; }
 .saved-search { max-width: 360px; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .btn.save { color: var(--muted); }
+td.nowrap .btn + .btn { margin-left: 4px; }
 .btn.save.on { color: #f5b301; }
 .table input.note { width: 220px; height: 26px; font-size: 12px; }
 .set-analysis { margin: 4px 0 12px; }
@@ -160,6 +161,8 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .set-chart .track > span:hover { filter: brightness(1.15); }
 .set-chart .track.empty { border: 1px dashed var(--border); border-radius: 4px; }
 .set-chart .total { font: 12px var(--mono); text-align: right; }
+.set-chart .set-sep { grid-column: 1 / -1; border-top: 1px solid var(--border); }
+.set-chart .all { font-weight: 700; }
 .set-tip { position: fixed; z-index: 20; pointer-events: none; padding: 6px 9px; border: 1px solid var(--border);
   border-radius: 6px; background: var(--panel); font-size: 12px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); }
 .set-tip b { font-weight: 600; }

@@ -97,7 +97,7 @@ Choose **Folder**, put a folder in **Audio folder** (and optionally in **Referen
 
   ![Per set, share of error: each bar is 100% of that set's error](docs/images/per-set-share.png)
 
-  - A bar per set split into missed / false alarm / confusion. **% of speech**: the parts add up to the set's DER.
+  - A bar per set split into missed / false alarm / confusion, and one for **all sets** (the whole folder) below them. **% of speech**: the parts add up to the set's DER.
     **share of error**: each part as a share of that set's error, so the dominant one stands out. Hover a part for its numbers.
   - A table per set (and all sets): DER, missed, false alarm, confusion, JER, the **main error**, mean speakers reference →
     predicted, how often the speaker count is right / too few / too many, and the share of overlapped reference speech.
@@ -127,7 +127,7 @@ What you get:
   - **Detailed**, with every speaker on its own lanes:
     - the waveform;
     - **diarization**: who speaks when, one lane per predicted speaker, with highlighted columns where 2+ speakers talk at once
-      (the **who speaks when** checkbox hides it);
+      in compact lanes (they keep their height when **lanes S / M / L / XL** changes; the **who speaks when** checkbox hides them);
     - each reference speaker, with the predicted speaker it was mapped to drawn below in the same color; with **differences** on, that lane is marked red where the reference speaker talks but the prediction misses it and amber where the prediction adds speech the reference does not have (collar excluded);
     - the model's speaker probability, with the onset/offset thresholds as dashed lines;
     - error lanes: missed / false alarm / confusion / reference overlap (gray = inside the collar, not scored);
@@ -146,8 +146,12 @@ What you get:
   the file at that error, **WAV** downloads one clip and **Download all** gives a zip with every clip, JSON and the CSV.
 - **Download**: RTTM, or JSON (includes the raw speaker probabilities).
 
-Mouse: wheel = zoom, drag or shift+wheel = pan, click = seek, shift+drag = zoom to a region, double-click = fit.
-Keys: `[` `]` previous / next file, `space` play, `Home` play from the start, `←` `→` seek 5 s (`shift` + `←` `→` pan), `m` mute, `f` full screen (metrics, timeline, error list and speakers table; `Esc` leaves), `+` `−` zoom, `0` fit, `n` / `p` next / previous error.
+**A–B loop**: press **A–B** (or `l`) to set A at the playback position, move on and press it again to set B: playback then
+repeats A → B until you press it a third time. **Alt+drag** on the timeline loops the dragged region, and ↻ on an error row
+loops that error (0.3 s on each side). The loop shows as a shaded band with A / B markers; opening another file clears it.
+
+Mouse: wheel = zoom, drag or shift+wheel = pan, ctrl+wheel = scroll the page up / down (to reach the lanes below when there are many speakers), click = seek, shift+drag = zoom to a region, double-click = fit.
+Keys: `[` `]` previous / next file, `space` play, `Home` play from the start, `l` A–B loop, `←` `→` seek 5 s (`shift` + `←` `→` pan), `m` mute, `f` full screen (metrics, timeline, error list and speakers table; `Esc` leaves), `+` `−` zoom, `0` fit, `n` / `p` next / previous error.
 
 ## Scoring
 

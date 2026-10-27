@@ -57,7 +57,7 @@ const store = {
 
 const player = $('#player');
 const timeline = new Timeline({
-  canvas: $('#timeline'), overview: $('#overview'), tooltip: $('#tooltip'), player, describe: describeTime,
+  canvas: $('#timeline'), overview: $('#overview'), tooltip: $('#tooltip'), player, describe: describeTime, onLoop: showLoop,
 });
 
 let result = null;      // last /api/run response
@@ -455,19 +455,23 @@ function renderSets() {
 
   const max = Math.max(1e-9, ...sets.map((s) => s.der ?? 0));
   const p1 = (x) => (x == null ? '–' : `${(x * 100).toFixed(1)}%`);
-  $('#set-chart').innerHTML = sets.map((s) => {
-    const label = `<span class="set-label${s.g === b.set ? ' on' : ''}" data-set="${esc(s.g)}" title="Show only ${esc(s.g)}">${esc(s.g)} <span class="muted">${s.scored}/${s.n}</span></span>`;
-    if (s.der == null) return `${label}<div class="track empty" data-set="${esc(s.g)}"></div><span class="total muted">not run</span>`;
+  // one bar per set, then one for the whole folder (data-set "": click shows all sets)
+  const bar = (s, key, name, cls = '') => {
+    const label = `<span class="set-label${key === (b.set || '') ? ' on' : ''}${cls}" data-set="${esc(key)}"
+      title="${key ? `Show only ${esc(key)}` : 'Show all sets'}">${esc(name)} <span class="muted">${s.scored}/${s.n}</span></span>`;
+    if (s.der == null) return `${label}<div class="track empty" data-set="${esc(key)}"></div><span class="total muted">not run</span>`;
     const err = s.miss + s.fa + s.conf;
     const parts = ERROR_PARTS.map(([k, name, color]) => {
       const x = s[k] / s.speech, share = err ? s[k] / err : 0;
       const w = setView === 'share' ? share * 100 : (x / max) * 100;
       if (w <= 0) return '';
       const text = setView === 'share' ? `${Math.round(share * 100)}%` : p1(x);
-      return `<span style="width:${w}%;background:var(${color})" data-set="${esc(s.g)}" data-part="${k}">${w > 9 ? text : ''}</span>`;
+      return `<span style="width:${w}%;background:var(${color})" data-set="${esc(key)}" data-part="${k}">${w > 9 ? text : ''}</span>`;
     }).join('');
-    return `${label}<div class="track" data-set="${esc(s.g)}">${parts}</div><span class="total">${p1(s.der)}</span>`;
-  }).join('');
+    return `${label}<div class="track" data-set="${esc(key)}">${parts}</div><span class="total${cls}">${p1(s.der)}</span>`;
+  };
+  $('#set-chart').innerHTML = sets.map((s) => bar(s, s.g, s.g)).join('')
+    + `<div class="set-sep"></div>${bar(aggregate(b.rows), '', 'all sets', ' all')}`;
 
   const main = (s) => {
     const top = ERROR_PARTS.reduce((a, p) => (s[p[0]] > s[a[0]] ? p : a));
@@ -500,14 +504,15 @@ function setTip(e) {
   const tip = $('#set-tip');
   const el = e.target.closest('[data-part]');
   if (!el) { tip.hidden = true; return; }
-  const s = aggregate(batch.rows.filter((r) => r.group === el.dataset.set));
+  const set = el.dataset.set;  // '' = the whole folder
+  const s = aggregate(set ? batch.rows.filter((r) => r.group === set) : batch.rows);
   const err = s.miss + s.fa + s.conf;
   const lines = ERROR_PARTS.map(([k, name, color]) => {
     const line = `<i class="dot" style="background:var(${color})"></i>${name}: ${(s[k] / s.speech * 100).toFixed(2)}% of speech · ${
       err ? Math.round((s[k] / err) * 100) : 0}% of the error · ${s[k].toFixed(1)} s`;
     return k === el.dataset.part ? `<b>${line}</b>` : line;
   });
-  tip.innerHTML = `<b>${esc(el.dataset.set)}</b> · DER ${(s.der * 100).toFixed(2)}% · ${s.scored} files<br>${lines.join('<br>')}`;
+  tip.innerHTML = `<b>${esc(set || 'all sets')}</b> · DER ${(s.der * 100).toFixed(2)}% · ${s.scored} files<br>${lines.join('<br>')}`;
   tip.hidden = false;
   const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
   Object.assign(tip.style, { left: `${x}px`, top: `${e.clientY + 14}px` });
@@ -573,7 +578,7 @@ function showResult(res) {
   renderTimeline(sameAudio);
   renderErrors();
   renderSpeakers();
-  if (res.audio !== loadedAudio) loadAudio(res.audio);
+  if (res.audio !== loadedAudio) { timeline.setLoop(null); loadAudio(res.audio); }
   updateTime();
 }
 
@@ -778,8 +783,9 @@ function simpleRows(shown, hypKey) {
   const scoring = `collar ±${res.score.collar} s${res.score.ignore_overlap ? ' · overlap not scored' : ''}`;
   rows.push(
     { kind: 'header', label: `Errors · red: missed · amber: false alarm · purple: confusion · ${scoring}` },
-    { kind: 'stack', label: 'errors', h: 30, unscored: lanes.unscored,
-      tracks: [{ colorVar: '--miss', segs: lanes.miss }, { colorVar: '--fa', segs: lanes.fa }, { colorVar: '--conf', segs: lanes.conf }] },
+    { kind: 'stack', label: 'errors', h: 48, unscored: lanes.unscored,
+      tracks: [{ colorVar: '--miss', segs: lanes.miss, label: 'missed' }, { colorVar: '--fa', segs: lanes.fa, label: 'false alarm' },
+               { colorVar: '--conf', segs: lanes.conf, label: 'confusion' }] },
   );
   return rows;
 }
@@ -861,7 +867,7 @@ function renderErrors() {
       <thead><tr><th></th><th></th><th>start</th><th>dur (s)</th><th title="speaker-seconds">error</th><th>reference</th><th>prediction</th></tr></thead>
       <tbody>${shown.map((g) => `
         <tr data-i="${g.i}">
-          <td><button class="btn icon play" title="Play this region">▶</button></td>
+          <td class="nowrap"><button class="btn icon play" title="Play this region">▶</button><button class="btn icon loop" title="Play this region over and over (A–B loop)">↻</button></td>
           <td>${saveButton(g)}</td>
           <td class="num">${fmtTime(g.start)}</td>
           <td class="num">${(g.end - g.start).toFixed(2)}</td>
@@ -997,6 +1003,37 @@ function playFromStart() {
   if (!player.src) return;
   timeline.seekBy(-player.currentTime);  // to 0:00, scrolling a zoomed-in view back to the start
   player.play();
+}
+
+// A–B loop: the first press sets A at the playback position, the second sets B and starts looping, the third clears it.
+function toggleLoop() {
+  const loop = timeline.loop, t = player.currentTime;
+  if (!player.src) return;
+  if (!loop) return timeline.setLoop([t]);
+  if (loop.length === 1) {
+    if (Math.abs(t - loop[0]) < 0.05) return setStatus('Move to where B should be (play or click the timeline), then press A–B again');
+    timeline.setLoop([Math.min(loop[0], t), Math.max(loop[0], t)]);
+    timeline.seek(timeline.loop[0]);
+    player.play();
+    return;
+  }
+  timeline.setLoop(null);
+}
+
+// Loop one error region, with a little audio around it.
+function loopRegion(g) {
+  focusRegion(g, false);
+  timeline.setLoop([Math.max(0, g.start - 0.3), Math.min(result.duration, g.end + 0.3)]);
+  timeline.seek(timeline.loop[0]);
+  player.play();
+}
+
+function showLoop(loop) {
+  const btn = $('#loop-btn');
+  btn.classList.toggle('on', Boolean(loop));
+  btn.textContent = !loop ? 'A–B' : loop.length === 1 ? `A ${fmtTime(loop[0])} · set B` : `↻ ${fmtTime(loop[0])} – ${fmtTime(loop[1])} ✕`;
+  btn.title = !loop ? 'A–B loop (l): set A here, then B; alt+drag on the timeline also selects a loop'
+    : loop.length === 1 ? 'Set B at the playback position and start looping (l)' : 'Stop looping (l)';
 }
 
 function togglePlay() {
@@ -1611,6 +1648,8 @@ function bindSaved() {
 function bindResults() {
   $('#play-btn').addEventListener('click', togglePlay);
   $('#restart-btn').addEventListener('click', playFromStart);
+  $('#loop-btn').addEventListener('click', toggleLoop);
+  showLoop(null);
   player.addEventListener('play', () => { $('#play-btn').textContent = '❚❚'; });
   player.addEventListener('pause', () => { $('#play-btn').textContent = '▶'; });
   player.addEventListener('timeupdate', updateTime);
@@ -1676,6 +1715,7 @@ function bindResults() {
   $('#errors').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-i]');
     if (tr && e.target.closest('.save')) return toggleSave(result.score.regions[Number(tr.dataset.i)]);
+    if (tr && e.target.closest('.loop')) return loopRegion(result.score.regions[Number(tr.dataset.i)]);
     if (tr) focusRegion(result.score.regions[Number(tr.dataset.i)], Boolean(e.target.closest('.play')));
   });
 }
@@ -1708,6 +1748,7 @@ function bindKeys() {
     if (!result) return;
     const actions = {
       ' ': togglePlay,
+      l: toggleLoop,
       Home: playFromStart,
       ArrowLeft: () => (e.shiftKey ? timeline.pan(-0.25) : timeline.seekBy(-SEEK_STEP)),
       ArrowRight: () => (e.shiftKey ? timeline.pan(0.25) : timeline.seekBy(SEEK_STEP)),
