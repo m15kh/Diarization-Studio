@@ -13,6 +13,7 @@
     <h1>Diarization Inspector</h1>
     <span class="muted">Sortformer · NeMo</span>
     <span id="model-badge" class="badge">no model loaded</span>
+    <button id="saved-link" class="badge saved-badge" title="Go to the saved errors" hidden></button>
   </header>
 
   <main>
@@ -104,6 +105,7 @@
         <button class="btn small" data-fsort="der" title="Worst first">DER</button>
       </div>
       <div class="toolbar">
+        <select id="folder-set" title="Only this set (sub-folder): the table, ◀ ▶, Run all and the totals follow it" hidden></select>
         <button id="folder-first" class="btn" title="Open the first file of the folder">⏮ first</button>
         <button id="folder-prev" class="btn icon" title="Previous file · [">◀</button>
         <span id="folder-pos" class="folder-pos"></span>
@@ -117,6 +119,22 @@
         <button id="folder-rttm" class="btn" title="All predictions in one RTTM file">Download RTTM</button>
       </div>
       <div id="folder-metrics" class="metrics"></div>
+      <details id="set-analysis" class="set-analysis" hidden>
+        <summary>Per set · what kind of error, by number of speakers</summary>
+        <div class="toolbar">
+          <span class="seg">
+            <button class="btn small" data-setview="abs" title="Each error type in % of scored speech: the bar is the DER">% of speech</button>
+            <button class="btn small" data-setview="share" title="Each error type as a share of the set's error: which one dominates">share of error</button>
+          </span>
+          <span class="legend"><i style="background:var(--miss)"></i>missed <i style="background:var(--fa)"></i>false alarm <i style="background:var(--conf)"></i>confusion</span>
+          <span class="grow"></span>
+          <span id="set-coverage" class="muted small"></span>
+          <button id="set-run-all" class="btn small" title="Run the files not run yet in every set">Run all sets</button>
+        </div>
+        <div id="set-chart" class="set-chart"></div>
+        <div id="set-table" class="scroll"></div>
+        <div id="set-tip" class="set-tip" hidden></div>
+      </details>
       <div id="folder-table" class="scroll"></div>
       <p class="hint">Only the file you open runs (the next one is prepared in the background). Click a file to inspect it below,
         <kbd>[</kbd> <kbd>]</kbd> previous / next. The folder reopens at the last file you looked at. Totals cover the files run so far.</p>
@@ -129,6 +147,7 @@
       <section class="block viewer">
         <span class="block-label">Timeline</span>
         <div class="toolbar">
+          <button id="restart-btn" class="btn icon" title="Play from the start (Home)">⏮</button>
           <button id="play-btn" class="btn icon" title="Play / pause (space)">▶</button>
           <span id="time" class="time">0:00.00 / 0:00.00</span>
           <select id="speed" title="Playback speed">
@@ -152,6 +171,7 @@
           <button id="prev-err" class="btn" title="Previous error (p)">◀ error</button>
           <button id="next-err" class="btn" title="Next error (n)">error ▶</button>
           <label class="check" id="show-all-wrap"><input type="checkbox" id="show-all"> <span id="show-all-label">silent outputs</span></label>
+          <label class="check" id="show-diar-wrap" title="The 'Diarization · who speaks when' lanes of the Detailed view"><input type="checkbox" id="show-diar" checked> who speaks when</label>
           <label class="check" id="show-diff-wrap" title="Mark each predicted speaker where it differs from its reference speaker"><input type="checkbox" id="show-diff" checked> differences</label>
           <span class="grow"></span>
           <button id="fullscreen-btn" class="btn icon" title="Full screen (f)">⛶</button>
@@ -166,7 +186,7 @@
         </div>
         <p class="hint">
           wheel: zoom · drag or shift+wheel: pan · click: seek · shift+drag: zoom to region · double-click: fit ·
-          keys: <kbd>space</kbd> play <kbd>←</kbd><kbd>→</kbd> seek 5 s (shift: pan) <kbd>m</kbd> mute <kbd>f</kbd> full screen <kbd>+</kbd><kbd>−</kbd> zoom <kbd>0</kbd> fit
+          keys: <kbd>space</kbd> play <kbd>Home</kbd> from the start <kbd>←</kbd><kbd>→</kbd> seek 5 s (shift: pan) <kbd>m</kbd> mute <kbd>f</kbd> full screen <kbd>+</kbd><kbd>−</kbd> zoom <kbd>0</kbd> fit
           <kbd>n</kbd><kbd>p</kbd> next / previous error
         </p>
       </section>
@@ -189,6 +209,19 @@
           <div id="speakers" class="scroll"></div>
         </section>
       </div>
+    </section>
+
+    <section id="saved" class="block" hidden>
+      <span class="block-label">Saved errors <span id="saved-count" class="count"></span></span>
+      <div class="toolbar">
+        <input id="saved-search" class="saved-search" placeholder="search: file, set, error type, speaker, note" spellcheck="false" autocomplete="off">
+        <span class="grow"></span>
+        <span id="saved-dir" class="muted small"></span>
+        <button id="saved-zip" class="btn" title="Every clip, its JSON and saved.csv in one zip">Download all</button>
+      </div>
+      <div id="saved-table" class="scroll"></div>
+      <p class="hint">☆ on an error saves it: the audio around it (1 s before and after) as a WAV, and its file, time, speakers, model,
+        settings and segments as JSON, in the saved/ folder of the project. Open goes back to it in the inspector.</p>
     </section>
   </main>
 

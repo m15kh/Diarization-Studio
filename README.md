@@ -1,7 +1,15 @@
 # Diarization Inspector
 
-A small web UI to run a NeMo Sortformer diarization checkpoint on an audio file and see exactly where it is wrong.
+A small web UI to run a NeMo Sortformer diarization checkpoint on an audio file, or a whole test set, and see exactly where it is wrong.
 FastAPI backend (Python) + plain HTML/JS frontend. No database, no build step.
+
+![The inspector with a whole test set open: inputs, post-processing, the folder totals and the per-set error breakdown](docs/images/overview.png)
+
+Every reference speaker next to the predicted speaker it was matched to, with what the model missed (red), added (amber) and confused (purple):
+
+![Timeline, simple view](docs/images/timeline-simple.png)
+
+*Screenshots: a 98M-parameter, 8-output Sortformer checkpoint on a Persian test set of 500 files with 2 to 8 speakers (`test/spk2` ... `test/spk8`).*
 
 ## Run
 
@@ -77,6 +85,24 @@ Choose **Folder**, put a folder in **Audio folder** (and optionally in **Referen
 
 - Sub-folders are searched too, so a whole test set works from its top folder: `test/` finds `spk2/wav/*.wav`, `spk3/wav/*.wav`, ... and each one's reference in the `rttm/` next to its `wav/`.
   The **set** column (and the CSV's `group`) says which sub-folder a file came from (`spk2`, without the `wav/`).
+  The set selector above the table (**all sets** / `spk2 (15)` / `spk3 (50)` / ...) narrows everything to one set: the table,
+  ◀ ▶ and `[` `]`, ⏮ first, **Run all** and the totals, so the totals show the DER of that set. It is remembered per folder.
+- **Per set** (when the folder has 2+ sets): which kind of error each set has, e.g. whether 8-speaker files fail by confusion
+  rather than by false alarms.
+
+  ![Per set, % of speech: the bar of each set is its DER, split into missed / false alarm / confusion](docs/images/per-set.png)
+
+  In the screenshot, 2-speaker files lose most to missed speech, while from 3 speakers on confusion dominates and grows with
+  the number of speakers (4.8% of the speech at 8 speakers). **share of error** makes the mix easier to compare:
+
+  ![Per set, share of error: each bar is 100% of that set's error](docs/images/per-set-share.png)
+
+  - A bar per set split into missed / false alarm / confusion. **% of speech**: the parts add up to the set's DER.
+    **share of error**: each part as a share of that set's error, so the dominant one stands out. Hover a part for its numbers.
+  - A table per set (and all sets): DER, missed, false alarm, confusion, JER, the **main error**, mean speakers reference →
+    predicted, how often the speaker count is right / too few / too many, and the share of overlapped reference speech.
+  - Click a set (bar or row) to show only that set; click it again for all sets. Numbers cover the files run so far:
+    **Run all sets** runs the rest of every set.
   An RTTM folder is searched the same way, by file name.
 - Only the file you open runs, so a large folder opens at once. ◀ ▶ (next to Audio or above the table) or `[` `]` step to the previous / next file. The next file is prepared in the background, so stepping forward is usually instant (it may delay a file you jump to elsewhere by one inference).
 - The folder reopens at the file you looked at last (remembered per folder in the browser). **⏮ first** starts over. After a page reload the folder reopens on its own if its checkpoint is already loaded.
@@ -89,6 +115,8 @@ Choose **Folder**, put a folder in **Audio folder** (and optionally in **Referen
 - **Run folder again** reruns every file, for example after loading another checkpoint. **Stop** stops after the current file.
 - **CSV**: one row per file. **Download RTTM**: all predictions in one RTTM file.
 
+![The folder panel with one set chosen and sorted by DER: totals, per-set breakdown and one row per file](docs/images/folder.png)
+
 The post-processing fields use NeMo's `PostProcessingParams` names. Changing them, the collar or "ignore overlap" re-scores instantly: the model output is cached, so only post-processing and scoring re-run. **Copy YAML** gives a `postprocessing_yaml` for `e2e_diarize_speech.py`. **Load YAML** (or dropping a `.yaml` file on the page) does the reverse: it reads the values from such a file (keys under `parameters:` or at the top level; `collar` and `ignore_overlap` too), and settings it does not name keep their value.
 
 What you get:
@@ -98,17 +126,28 @@ What you get:
   - **Simple** (default): the waveform, then one compact lane per speaker with the reference on top (yellow **REF** badge) and its matched prediction right below (cyan **PRED** badge, darker background) in the same color (with **differences** on: red where the prediction misses the reference, amber where it adds speech the reference does not have), then one error lane (missed / false alarm / confusion);
   - **Detailed**, with every speaker on its own lanes:
     - the waveform;
-    - **diarization**: who speaks when, one lane per predicted speaker, with highlighted columns where 2+ speakers talk at once;
+    - **diarization**: who speaks when, one lane per predicted speaker, with highlighted columns where 2+ speakers talk at once
+      (the **who speaks when** checkbox hides it);
     - each reference speaker, with the predicted speaker it was mapped to drawn below in the same color; with **differences** on, that lane is marked red where the reference speaker talks but the prediction misses it and amber where the prediction adds speech the reference does not have (collar excluded);
     - the model's speaker probability, with the onset/offset thresholds as dashed lines;
     - error lanes: missed / false alarm / confusion / reference overlap (gray = inside the collar, not scored);
   - both: **lanes S / M / L / XL** sets the height of the speaker and error lanes, an overview strip with every error position, and **Speakers** chips above the timeline: click to hide / show a speaker, double-click to show only that one, **all** to show everyone.
+
+  ![Timeline, detailed view: who speaks when, each reference speaker with the model's probability for its matched speaker, and one lane per error type](docs/images/timeline-detailed.png)
 - **Error list**: click a row to zoom to it, ▶ to listen to it. Show only some error types (**miss** / **FA** / **conf**; ◀ error ▶ follows the same choice). Sort by time or by size.
 - **Speakers table**: mapping, talk time, recall and precision per speaker.
+
+  ![Error list and speakers table](docs/images/errors-speakers.png)
+- **Saved errors**: ☆ on an error row saves it (★ = saved, click again to remove). The server writes the audio around it
+  (1 s before and after) as `saved/<file>_<start>s_<type>_<id>.wav` and everything about it as a JSON next to it: audio path,
+  set, time, error type and seconds, speakers, the reference / prediction segments around it, checkpoint, post-processing
+  settings and the file's DER. `saved/saved.csv` lists all of them. The **Saved errors** panel (★ N saved in the header jumps
+  to it) searches them by file, set, type, speaker or note, plays the clip, keeps a note per error, **Open** goes back to
+  the file at that error, **WAV** downloads one clip and **Download all** gives a zip with every clip, JSON and the CSV.
 - **Download**: RTTM, or JSON (includes the raw speaker probabilities).
 
 Mouse: wheel = zoom, drag or shift+wheel = pan, click = seek, shift+drag = zoom to a region, double-click = fit.
-Keys: `[` `]` previous / next file, `space` play, `←` `→` seek 5 s (`shift` + `←` `→` pan), `m` mute, `f` full screen (metrics, timeline, error list and speakers table; `Esc` leaves), `+` `−` zoom, `0` fit, `n` / `p` next / previous error.
+Keys: `[` `]` previous / next file, `space` play, `Home` play from the start, `←` `→` seek 5 s (`shift` + `←` `→` pan), `m` mute, `f` full screen (metrics, timeline, error list and speakers table; `Esc` leaves), `+` `−` zoom, `0` fit, `n` / `p` next / previous error.
 
 ## Scoring
 
@@ -127,9 +166,10 @@ backend/server.py    FastAPI app: the API, and serves the frontend
 backend/model.py     NeMo wrapper: load .nemo / .ckpt, inference, post-processing
 backend/scoring.py   RTTM read/write, DER, speaker mapping, error regions
 frontend/            index.html, app.js (UI), timeline.js (canvas timeline), style.css
+docs/images/         the screenshots in this README
 ```
 
 ## Notes
 
 - Inference is offline (whole file in one pass). That is fine for minutes of audio; hours may run out of GPU memory.
-- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except uploads, which go to `uploads/` in the project: `audio/`, `rttm/` (reference), `pred_rttm/` (prediction) and `checkpoints/`. Re-uploading a file with the same name replaces it.
+- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except saved errors (`saved/`) and uploads, which go to `uploads/` in the project: `audio/`, `rttm/` (reference), `pred_rttm/` (prediction) and `checkpoints/`. Re-uploading a file with the same name replaces it.

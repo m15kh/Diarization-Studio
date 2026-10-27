@@ -75,9 +75,12 @@ let shown = null;       // { audio, ref, hyp } of `result`, re-scored when the s
 let batch = null;       // folder: { path, ref_dir, hyp_dir, fields, checkpoint, active, rows: [{ audio, name, group, ref, hyp, res?, error? }] }
 let batchSeq = 0;
 let folderSort = 'name';
+let setView = store.get('setView', 'abs');  // per-set chart: 'abs' (% of speech) or 'share' (share of the error)
 let errorSort = 'time';
 const errorTypes = new Set(store.get('errorTypes', ['miss', 'fa', 'conf']));  // error types the list and ◀ ▶ show
 let picker = null;
+let savedItems = [];    // saved errors (see /api/saved), newest first
+const clipPlayer = new Audio();
 let rescoreTimer = null;
 let statusTimer = null;
 
@@ -87,13 +90,15 @@ restore();
 bindInputs();
 bindResults();
 bindKeys();
+bindSaved();
 initServer();
+loadSaved();
 
 // ---- server -------------------------------------------------------------------------------
 
-async function api(url, body) {
-  const opts = body === undefined ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+async function api(url, body, method) {
+  const opts = body === undefined ? { method: method || 'GET' } : {
+    method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   };
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({ detail: `${res.status} ${res.statusText}` }));
@@ -229,10 +234,19 @@ async function runFolder() {
     if (seq !== batchSeq) return;
     hideError();
     batch = { ...list, fields, checkpoint, rows: list.files.map((f) => ({ ...f })) };
+    const groups = [...new Set(batch.rows.map((r) => r.group))].filter(Boolean);
+    const set = store.get('folderSet', {})[batch.path] || '';
+    batch.set = groups.includes(set) ? set : '';
+    $('#folder-set').hidden = !groups.length;
+    $('#folder-set').innerHTML = [['', `all sets (${batch.rows.length})`],
+      ...groups.map((g) => [g, `${g} (${batch.rows.filter((r) => r.group === g).length})`])]
+      .map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('');
+    $('#folder-set').value = batch.set;
     const last = store.get('folderPos', {})[batch.path];
-    const start = Math.max(0, batch.rows.findIndex((r) => r.name === last));
+    const inSet = setRows(batch);
+    const start = inSet.find((i) => batch.rows[i].name === last) ?? inSet[0];
     await openFolderFile(start);
-    if (start > 0) setStatus(`Resumed at ${last} (${start + 1} / ${batch.rows.length}) · ⏮ first starts over`);
+    if (start !== inSet[0]) setStatus(`Resumed at ${last} (${inSet.indexOf(start) + 1} / ${inSet.length}) · ⏮ first starts over`);
   } catch (e) {
     if (seq === batchSeq) showError(e);
   }
@@ -240,9 +254,10 @@ async function runFolder() {
 
 // (Re-)score the files with the current settings: 'all', 'done' (the ones that have a result) or 'missing'
 // (the ones that do not). Model outputs are cached, so a re-score is quick.
-async function scoreFolder(seq, which = 'all') {
+async function scoreFolder(seq, which = 'all', everySet = false) {
   const b = batch;
-  const todo = which === 'all' ? b.rows : b.rows.filter((r) => Boolean(r.res) === (which === 'done'));
+  const rows = which === 'done' || everySet ? b.rows : setRows(b).map((i) => b.rows[i]);  // runs cover the chosen set
+  const todo = which === 'all' ? rows : rows.filter((r) => Boolean(r.res) === (which === 'done'));
   Object.assign(b, { running: true, stopped: false, done: 0, total: todo.length });
   for (const row of todo) {
     b.current = row;
@@ -275,15 +290,17 @@ function renderFolder() {
   const b = batch;
   $('#folder').hidden = !b || mode !== 'folder';
   if (!b) return;
-  const n = b.rows.length;
-  const done = b.rows.filter((r) => r.res);
+  const shownIdx = setRows(b), rows = shownIdx.map((i) => b.rows[i]);
+  const n = rows.length;
+  const done = rows.filter((r) => r.res);
   const scored = done.filter((r) => r.res.score);
-  const failed = b.rows.filter((r) => r.error).length;
-  $('#folder-count').textContent = `${n}`;
-  const open = b.rows[b.active];
-  $('#folder-pos').textContent = open ? `${b.active + 1} / ${n} · ${open.group ? `${open.group} · ` : ''}${basename(open.audio)}` : '';
-  $('#folder-first').disabled = $('#folder-prev').disabled = !b.active;
-  $('#folder-next').disabled = b.active == null || b.active >= n - 1;
+  const failed = rows.filter((r) => r.error).length;
+  $('#folder-count').textContent = n < b.rows.length ? `${n} / ${b.rows.length}` : `${n}`;
+  const open = b.rows[b.active], pos = shownIdx.indexOf(b.active);
+  $('#folder-pos').textContent = open
+    ? `${pos >= 0 ? `${pos + 1} / ${n}` : 'not in this set'} · ${open.group ? `${open.group} · ` : ''}${basename(open.audio)}` : '';
+  $('#folder-first').disabled = $('#folder-prev').disabled = pos === 0;
+  $('#folder-next').disabled = pos >= 0 && pos >= n - 1;
   $('#folder-progress').innerHTML = `${b.running ? '<span class="spinner"></span>' : ''}${esc(b.path)}${
     b.running ? ` · running ${b.done} / ${b.total}` : b.stopped ? ` · stopped at ${b.done} / ${b.total}` : ''}`;
   $('#folder-stop').hidden = !b.running;
@@ -298,7 +315,7 @@ function renderFolder() {
     failed ? `${failed} failed` : `${scored.length} with reference`, failed ? 'warn' : '')];
   if (scored.length) {
     const [m, f, c] = ['miss_s', 'fa_s', 'conf_s'].map((k) => sum(scored, (res) => res.score[k]));
-    cards.push(card('DER', pct(rate(m + f + c)), `all files · ${speech.toFixed(0)} s scored speech`, 'main'));
+    cards.push(card('DER', pct(rate(m + f + c)), `${b.set || 'all files'} · ${speech.toFixed(0)} s scored speech`, 'main'));
     cards.push(card('Missed', pct(rate(m)), secs(m), 'miss'));
     cards.push(card('False alarm', pct(rate(f)), secs(f), 'fa'));
     cards.push(card('Confusion', pct(rate(c)), secs(c), 'conf'));
@@ -311,11 +328,12 @@ function renderFolder() {
     cards.push(card('Inference', `${infer.toFixed(1)} s`, `RTF ${(infer / sum(model, (res) => res.duration)).toFixed(4)}`));
   }
   $('#folder-metrics').innerHTML = cards.join('');
+  renderSets();
 
-  const hasRef = b.rows.some((r) => r.ref);
-  const order = b.rows.map((_, i) => i);
+  const hasRef = rows.some((r) => r.ref);
+  const order = [...shownIdx];
   if (folderSort === 'der') order.sort((i, j) => (b.rows[j].res?.score?.der ?? -1) - (b.rows[i].res?.score?.der ?? -1));
-  const hasGroup = b.rows.some((r) => r.group);
+  const hasGroup = !b.set && rows.some((r) => r.group);  // one set: its name is in the selector
   const head = ['file', ...(hasGroup ? ['set'] : []), 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion', 'JER'] : ['speech', 'overlap']), 'inference'];
   const body = order.map((i) => {
     const r = b.rows[i], res = r.res, s = res?.score;
@@ -366,7 +384,8 @@ async function openFolderFile(i, scroll = false) {
   if (!res || batch !== b) return;
   keepInFolder(res);
   if (scroll) $('#results').scrollIntoView({ behavior: 'smooth' });
-  prefetch(b, i + 1);
+  const inSet = setRows(b);
+  prefetch(b, inSet[inSet.indexOf(i) + 1]);
 }
 
 // A file's numbers for the folder table, like the server's `brief` result.
@@ -395,10 +414,125 @@ async function prefetch(b, i) {
   } catch { /* the error shows when the file is opened */ }
 }
 
+// Error totals over some files of the folder: DER and its parts over all their scored speech (time-weighted,
+// like NeMo / pyannote), JER over all their reference speakers, and how often the speaker count is right.
+function aggregate(rows) {
+  const done = rows.filter((r) => r.res), scored = done.filter((r) => r.res.score);
+  const sum = (list, f) => list.reduce((acc, r) => acc + (f(r.res) || 0), 0);
+  const speech = sum(scored, (res) => res.score.ref_speech);
+  const [miss, fa, conf] = ['miss_s', 'fa_s', 'conf_s'].map((k) => sum(scored, (res) => res.score[k]));
+  const nj = sum(scored, (res) => res.score.jer_speakers);
+  const counted = done.filter((r) => r.res.ref);
+  const diff = counted.map((r) => r.res.hyp.speakers - r.res.ref.speakers);
+  const refSpeech = sum(counted, (res) => res.ref.speech);
+  return {
+    n: rows.length, done: done.length, scored: scored.length, speech, miss, fa, conf,
+    der: speech ? (miss + fa + conf) / speech : null,
+    jer: nj ? sum(scored, (res) => res.score.jer_sum) / nj : null,
+    counted: counted.length,
+    exact: diff.filter((d) => d === 0).length, under: diff.filter((d) => d < 0).length, over: diff.filter((d) => d > 0).length,
+    refSpk: counted.length ? sum(counted, (res) => res.ref.speakers) / counted.length : null,
+    hypSpk: counted.length ? sum(counted, (res) => res.hyp.speakers) / counted.length : null,
+    overlap: refSpeech ? sum(counted, (res) => res.ref.overlap) / refSpeech : null,
+  };
+}
+
+const ERROR_PARTS = [['miss', 'missed', '--miss'], ['fa', 'false alarm', '--fa'], ['conf', 'confusion', '--conf']];
+
+// Per set (sub-folder, e.g. spk2 ... spk8): one bar split into missed / false alarm / confusion, and a table.
+function renderSets() {
+  const b = batch;
+  const groups = [...new Set(b.rows.map((r) => r.group))].filter(Boolean);
+  const box = $('#set-analysis');
+  box.hidden = groups.length < 2;
+  if (box.hidden) return;
+  if (box.dataset.init !== b.path) { box.open = store.get('setsOpen', true); box.dataset.init = b.path; }
+  const sets = groups.map((g) => ({ g, ...aggregate(b.rows.filter((r) => r.group === g)) }));
+  for (const btn of document.querySelectorAll('[data-setview]')) btn.classList.toggle('on', btn.dataset.setview === setView);
+  const done = sets.reduce((a, s) => a + s.done, 0);
+  $('#set-coverage').textContent = `${done} / ${b.rows.length} files run${done < b.rows.length ? ' · numbers cover these only' : ''}`;
+  $('#set-run-all').hidden = b.running || done >= b.rows.length;
+
+  const max = Math.max(1e-9, ...sets.map((s) => s.der ?? 0));
+  const p1 = (x) => (x == null ? '–' : `${(x * 100).toFixed(1)}%`);
+  $('#set-chart').innerHTML = sets.map((s) => {
+    const label = `<span class="set-label${s.g === b.set ? ' on' : ''}" data-set="${esc(s.g)}" title="Show only ${esc(s.g)}">${esc(s.g)} <span class="muted">${s.scored}/${s.n}</span></span>`;
+    if (s.der == null) return `${label}<div class="track empty" data-set="${esc(s.g)}"></div><span class="total muted">not run</span>`;
+    const err = s.miss + s.fa + s.conf;
+    const parts = ERROR_PARTS.map(([k, name, color]) => {
+      const x = s[k] / s.speech, share = err ? s[k] / err : 0;
+      const w = setView === 'share' ? share * 100 : (x / max) * 100;
+      if (w <= 0) return '';
+      const text = setView === 'share' ? `${Math.round(share * 100)}%` : p1(x);
+      return `<span style="width:${w}%;background:var(${color})" data-set="${esc(s.g)}" data-part="${k}">${w > 9 ? text : ''}</span>`;
+    }).join('');
+    return `${label}<div class="track" data-set="${esc(s.g)}">${parts}</div><span class="total">${p1(s.der)}</span>`;
+  }).join('');
+
+  const main = (s) => {
+    const top = ERROR_PARTS.reduce((a, p) => (s[p[0]] > s[a[0]] ? p : a));
+    const err = s.miss + s.fa + s.conf;
+    return err ? `<i class="dot" style="background:var(${top[2]})"></i>${top[1]} ${Math.round((s[top[0]] / err) * 100)}%` : '–';
+  };
+  const share = (x, n) => (n ? `${Math.round((x / n) * 100)}%` : '–');
+  const total = { g: 'all sets', ...aggregate(b.rows) };
+  const row = (s, cls = '') => `<tr class="${cls}${s.g === b.set ? ' active' : ''}" ${s.g !== 'all sets' ? `data-set="${esc(s.g)}"` : ''}>
+    <td>${esc(s.g)}</td><td class="num">${s.done} / ${s.n}</td>
+    <td class="num">${p1(s.der)}</td><td class="num">${p1(s.speech ? s.miss / s.speech : null)}</td>
+    <td class="num">${p1(s.speech ? s.fa / s.speech : null)}</td><td class="num">${p1(s.speech ? s.conf / s.speech : null)}</td>
+    <td class="num">${p1(s.jer)}</td><td>${s.der == null ? '–' : main(s)}</td>
+    <td class="num">${s.refSpk == null ? '–' : `${s.refSpk.toFixed(1)} → ${s.hypSpk.toFixed(1)}`}</td>
+    <td class="num">${share(s.exact, s.counted)}</td><td class="num">${share(s.under, s.counted)}</td><td class="num">${share(s.over, s.counted)}</td>
+    <td class="num">${p1(s.overlap)}</td></tr>`;
+  $('#set-table').innerHTML = `<table class="table">
+    <thead><tr><th>set</th><th class="num">files run</th><th class="num">DER</th><th class="num">missed</th>
+      <th class="num">false alarm</th><th class="num">confusion</th><th class="num">JER</th><th>main error</th>
+      <th class="num" title="Mean number of speakers per file: reference → predicted">speakers</th>
+      <th class="num" title="Files where the predicted number of speakers is right">count right</th>
+      <th class="num" title="Files with fewer predicted speakers than in the reference">too few</th>
+      <th class="num" title="Files with more predicted speakers than in the reference">too many</th>
+      <th class="num" title="Share of reference speech where 2+ speakers talk at once">overlap</th></tr></thead>
+    <tbody>${sets.map((s) => row(s)).join('')}${row(total, 'total')}</tbody></table>`;
+}
+
+// Hover text for one part of a per-set bar.
+function setTip(e) {
+  const tip = $('#set-tip');
+  const el = e.target.closest('[data-part]');
+  if (!el) { tip.hidden = true; return; }
+  const s = aggregate(batch.rows.filter((r) => r.group === el.dataset.set));
+  const err = s.miss + s.fa + s.conf;
+  const lines = ERROR_PARTS.map(([k, name, color]) => {
+    const line = `<i class="dot" style="background:var(${color})"></i>${name}: ${(s[k] / s.speech * 100).toFixed(2)}% of speech · ${
+      err ? Math.round((s[k] / err) * 100) : 0}% of the error · ${s[k].toFixed(1)} s`;
+    return k === el.dataset.part ? `<b>${line}</b>` : line;
+  });
+  tip.innerHTML = `<b>${esc(el.dataset.set)}</b> · DER ${(s.der * 100).toFixed(2)}% · ${s.scored} files<br>${lines.join('<br>')}`;
+  tip.hidden = false;
+  const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  Object.assign(tip.style, { left: `${x}px`, top: `${e.clientY + 14}px` });
+}
+
+// Indices of the rows in the chosen set (all rows when no set is chosen).
+function setRows(b) {
+  return b.rows.flatMap((r, i) => (!b.set || r.group === b.set ? [i] : []));
+}
+
 function stepFolder(step) {
-  const i = (batch.active ?? -1) + step;
-  if (i < 0 || i >= batch.rows.length) return setStatus(step > 0 ? 'Last file in this folder' : 'First file in this folder');
+  const inSet = setRows(batch), pos = inSet.indexOf(batch.active);
+  const i = pos < 0 ? inSet[0] : inSet[pos + step];  // the open file is from another set: start this one
+  if (i == null) return setStatus(step > 0 ? 'Last file in this set' : 'First file in this set');
   openFolderFile(i);
+}
+
+function chooseSet(set) {
+  const b = batch;
+  b.set = set;
+  const sets = Object.entries(store.get('folderSet', {})).filter(([path]) => path !== b.path);
+  store.set('folderSet', Object.fromEntries([[b.path, set], ...sets].slice(0, FOLDER_MEMORY)));
+  const inSet = setRows(b);
+  if (!inSet.includes(b.active)) openFolderFile(inSet[0]);
+  else renderFolder();
 }
 
 function rerunFolder() {
@@ -410,14 +544,15 @@ function rerunFolder() {
 }
 
 function downloadFolder(kind) {
-  const name = basename(batch.path) || 'folder';
+  const name = [basename(batch.path) || 'folder', batch.set].filter(Boolean).join('_');
+  const rows = setRows(batch).map((i) => batch.rows[i]);  // the chosen set
   if (kind === 'rttm') {
-    download(`${name}.rttm`, batch.rows.map((r) => r.res?.rttm || '').join(''), 'text/plain');
+    download(`${name}.rttm`, rows.map((r) => r.res?.rttm || '').join(''), 'text/plain');
     return;
   }
   const cols = ['file', 'group', 'duration_s', 'ref_speakers', 'pred_speakers', 'der', 'miss', 'fa', 'conf', 'jer', 'ref_speech_s', 'infer_s', 'error'];
   const cell = (x) => (x == null ? '' : /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : String(x));
-  const lines = batch.rows.map(({ audio, group, res, error }) => [
+  const lines = rows.map(({ audio, group, res, error }) => [
     basename(audio), group, res?.duration, res?.ref?.speakers, res?.hyp.speakers, res?.score?.der, res?.score?.miss,
     res?.score?.fa, res?.score?.conf, res?.score?.jer, res?.score?.ref_speech, res?.source === 'model' ? res.infer_time : null, error,
   ].map(cell).join(','));
@@ -539,11 +674,13 @@ function renderTimeline(keepView) {
   });
 
   // who speaks when: one lane per predicted speaker, overlapped speech highlighted across all lanes
-  rows.push({ kind: 'header', label: 'Diarization · who speaks when · highlighted: 2+ speakers at once' });
+  // (can be hidden, unless nothing else would be drawn: a prediction RTTM without reference)
+  const showDiar = $('#show-diar').checked || (!res.score && !res.probs);
+  if (showDiar) rows.push({ kind: 'header', label: 'Diarization · who speaks when · highlighted: 2+ speakers at once' });
   res.hyp.names.forEach((name, h) => {
     if (!(showAll || v.hypVisible[h] || res.score?.hyp_to_ref[h] != null)) return;
     if (!res.score) chips.push({ key: hypKey(h), label: name, color: v.hypColor[h] });
-    if (!shown(hypKey(h))) return;
+    if (!showDiar || !shown(hypKey(h))) return;
     rows.push({ kind: 'seg', label: name, color: v.hypColor[h], segs: v.hypSegs[h], highlight: v.hypOverlap,
                 muted: !v.hypSegs[h].length });
   });
@@ -595,6 +732,7 @@ function renderTimeline(keepView) {
   renderSpeakerFilter(chips);
   $('#show-all-wrap').hidden = !res.probs;
   $('#show-diff-wrap').hidden = !res.score;
+  $('#show-diar-wrap').hidden = viewMode !== 'detailed' || (!res.score && !res.probs);
   for (const b of document.querySelectorAll('[data-view]')) b.classList.toggle('on', b.dataset.view === viewMode);
   $('#show-all-label').textContent = `silent outputs${hidden ? ` (${hidden} hidden)` : ''}`;
   $('#prev-err').disabled = $('#next-err').disabled = !res.score?.regions.length;
@@ -720,10 +858,11 @@ function renderErrors() {
   const tag = (cls, label, x) => (x > 0 ? `<span class="tag ${cls}">${label} ${x.toFixed(2)}</span>` : '');
   box.innerHTML = `
     <table class="table">
-      <thead><tr><th></th><th>start</th><th>dur (s)</th><th title="speaker-seconds">error</th><th>reference</th><th>prediction</th></tr></thead>
+      <thead><tr><th></th><th></th><th>start</th><th>dur (s)</th><th title="speaker-seconds">error</th><th>reference</th><th>prediction</th></tr></thead>
       <tbody>${shown.map((g) => `
         <tr data-i="${g.i}">
           <td><button class="btn icon play" title="Play this region">▶</button></td>
+          <td>${saveButton(g)}</td>
           <td class="num">${fmtTime(g.start)}</td>
           <td class="num">${(g.end - g.start).toFixed(2)}</td>
           <td>${tag('miss', 'miss', g.miss)}${tag('fa', 'FA', g.fa)}${tag('conf', 'conf', g.conf)}</td>
@@ -851,6 +990,13 @@ function mixDown(buffer) {
     for (let i = 0; i < out.length; i++) out[i] += data[i] / buffer.numberOfChannels;
   }
   return out;
+}
+
+// Play the whole file from 0:00.
+function playFromStart() {
+  if (!player.src) return;
+  timeline.seekBy(-player.currentTime);  // to 0:00, scrolling a zoomed-in view back to the start
+  player.play();
 }
 
 function togglePlay() {
@@ -1061,7 +1207,24 @@ function bindInputs() {
 
   $('#folder-stop').addEventListener('click', stopFolder);
   $('#folder-all').addEventListener('click', () => { batch.checkpoint = val('checkpoint'); scoreFolder(++batchSeq, 'missing'); });
-  $('#folder-first').addEventListener('click', () => openFolderFile(0));
+  $('#folder-first').addEventListener('click', () => openFolderFile(setRows(batch)[0]));
+  $('#folder-set').addEventListener('change', (e) => { chooseSet(e.target.value); e.target.blur(); });
+  for (const btn of document.querySelectorAll('[data-setview]')) {
+    btn.addEventListener('click', () => { setView = btn.dataset.setview; store.set('setView', setView); renderSets(); });
+  }
+  $('#set-analysis').addEventListener('toggle', (e) => store.set('setsOpen', e.target.open));
+  $('#set-run-all').addEventListener('click', () => { batch.checkpoint = val('checkpoint'); scoreFolder(++batchSeq, 'missing', true); });
+  for (const id of ['#set-chart', '#set-table']) {
+    $(id).addEventListener('click', (e) => {
+      const el = e.target.closest('[data-set]');
+      if (!el) return;
+      const set = el.dataset.set === batch.set ? '' : el.dataset.set;  // the chosen set again: back to all sets
+      $('#folder-set').value = set;
+      chooseSet(set);
+    });
+  }
+  $('#set-chart').addEventListener('mousemove', setTip);
+  $('#set-chart').addEventListener('mouseleave', () => { $('#set-tip').hidden = true; });
   $('#folder-prev').addEventListener('click', () => stepFolder(-1));
   $('#folder-next').addEventListener('click', () => stepFolder(1));
   $('#folder-rerun').addEventListener('click', rerunFolder);
@@ -1301,10 +1464,153 @@ function showError(e) {
 
 function hideError() { $('#error').hidden = true; }
 
+// ---- saved errors -------------------------------------------------------------------------
+
+const CLIP_PAD = 1;  // seconds of audio saved before and after an error
+
+function savedFor(g) {
+  return savedItems.find((x) => x.audio === result.audio && Math.abs(x.start - g.start) < 0.005 && Math.abs(x.end - g.end) < 0.005);
+}
+
+function saveButton(g) {
+  const saved = savedFor(g);
+  return `<button class="btn icon save${saved ? ' on' : ''}" title="${saved ? 'Saved · click to remove' : 'Save this error with its audio'}">${saved ? '★' : '☆'}</button>`;
+}
+
+async function loadSaved() {
+  try {
+    const d = await api('/api/saved');
+    savedItems = d.items;
+    $('#saved-dir').textContent = d.dir;
+    $('#saved-dir').title = 'Clips, JSON and saved.csv are kept here on the server';
+  } catch { /* server not reachable yet */ }
+  renderSaved();
+}
+
+// Save an error of the open file (or remove it when it is saved already).
+async function toggleSave(g) {
+  const saved = savedFor(g);
+  try {
+    if (saved) {
+      await api(`/api/saved/${encodeURIComponent(saved.id)}`, undefined, 'DELETE');
+      savedItems = savedItems.filter((x) => x !== saved);
+      setStatus('Removed from saved errors');
+    } else {
+      const res = result, from = g.start - CLIP_PAD, to = g.end + CLIP_PAD;
+      const near = (side) => (res[side]?.segments || []).filter(([s, e]) => e > from && s < to)
+        .map(([s, e, k]) => [s, e, res[side].names[k]]);
+      const item = await api('/api/saved', {
+        audio: res.audio, start: g.start, end: g.end, pad: CLIP_PAD, miss: g.miss, fa: g.fa, conf: g.conf,
+        group: batch?.rows.find((r) => r.audio === res.audio)?.group || '',
+        ref_speakers: g.ref.map((k) => res.ref.names[k]), hyp_speakers: g.hyp.map((k) => res.hyp.names[k]),
+        ref_rttm: shown?.ref || '', hyp_rttm: shown?.hyp || '', checkpoint: res.model?.path || '',
+        settings: getSettings(), file_der: res.score?.der ?? null, segments: { ref: near('ref'), hyp: near('hyp') },
+      });
+      savedItems.unshift(item);
+      setStatus(`Saved ${item.clip}`);
+    }
+  } catch (e) { showError(e); }
+  renderErrors();
+  renderSaved();
+}
+
+function renderSaved() {
+  const n = savedItems.length;
+  $('#saved').hidden = !n;
+  $('#saved-link').hidden = !n;
+  $('#saved-link').textContent = `★ ${n} saved`;
+  $('#saved-count').textContent = n ? `${n}` : '';
+  const terms = $('#saved-search').value.toLowerCase().split(/\s+/).filter(Boolean);
+  const items = savedItems.filter((x) => {
+    const text = [x.group, x.file_id, ...x.types, ...x.ref_speakers, ...x.hyp_speakers, x.note].join(' ').toLowerCase();
+    return terms.every((t) => text.includes(t));
+  });
+  if (n && items.length < n) $('#saved-count').textContent = `${items.length} / ${n}`;
+  const tag = (cls, label, x) => (x > 0 ? `<span class="tag ${cls}">${label} ${x.toFixed(2)}</span>` : '');
+  $('#saved-table').innerHTML = !items.length ? '<p class="empty">No saved error matches.</p>' : `
+    <table class="table">
+      <thead><tr><th></th><th>file</th><th>start</th><th>dur (s)</th><th>error</th><th>reference</th><th>prediction</th>
+        <th>note</th><th>saved</th><th></th></tr></thead>
+      <tbody>${items.map((x) => `
+        <tr data-id="${esc(x.id)}">
+          <td><button class="btn icon clip" title="Play the saved clip">▶</button></td>
+          <td title="${esc(x.audio)}">${x.group ? `<span class="muted">${esc(x.group)} · </span>` : ''}${esc(x.file_id)}</td>
+          <td class="num">${fmtTime(x.start)}</td>
+          <td class="num">${x.duration.toFixed(2)}</td>
+          <td>${tag('miss', 'miss', x.miss)}${tag('fa', 'FA', x.fa)}${tag('conf', 'conf', x.conf)}</td>
+          <td>${esc(x.ref_speakers.join(' '))}</td>
+          <td>${esc(x.hyp_speakers.join(' '))}</td>
+          <td><input class="note" value="${esc(x.note)}" placeholder="add a note" spellcheck="false"></td>
+          <td class="muted" title="${esc(x.checkpoint)}">${esc(x.saved_at.replace('T', ' ').slice(0, 16))}</td>
+          <td><button class="btn small open" title="Open this file at the error">Open</button>
+            <a class="btn small" href="/api/saved/${encodeURIComponent(x.id)}/clip" download="${esc(x.clip)}" title="Download the clip">WAV</a>
+            <button class="btn small remove" title="Delete the clip and its data">✕</button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+// Go back to a saved error: open its file (in the folder when it is part of it) and zoom to the error.
+async function openSaved(x) {
+  const i = mode === 'folder' && batch ? batch.rows.findIndex((r) => r.audio === x.audio) : -1;
+  if (i >= 0) await openFolderFile(i);
+  else await runFile({ audio: x.audio, ref: x.ref_rttm, hyp: x.hyp_rttm });
+  if (result?.audio !== x.audio) return;
+  const g = result.score?.regions.find((r) => Math.abs(r.start - x.start) < 0.005 && Math.abs(r.end - x.end) < 0.005);
+  if (g) focusRegion(g, false);
+  else { timeline.zoomTo(x.start - CLIP_PAD, x.end + CLIP_PAD); timeline.seek(x.start); }  // other settings: not an error now
+  $('#results').scrollIntoView({ behavior: 'smooth' });
+}
+
+function bindSaved() {
+  $('#saved-link').addEventListener('click', () => $('#saved').scrollIntoView({ behavior: 'smooth' }));
+  $('#saved-search').addEventListener('input', renderSaved);
+  $('#saved-zip').addEventListener('click', () => { window.location.href = '/api/saved-export'; });
+  const clipStopped = () => { for (const b of document.querySelectorAll('#saved-table .clip')) b.textContent = '▶'; };
+  clipPlayer.addEventListener('ended', clipStopped);
+  player.addEventListener('play', () => { clipPlayer.pause(); clipStopped(); });
+  $('#saved-table').addEventListener('click', async (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    const x = tr && savedItems.find((it) => it.id === tr.dataset.id);
+    if (!x) return;
+    if (e.target.closest('.clip')) {
+      const url = `/api/saved/${encodeURIComponent(x.id)}/clip`;
+      const playing = !clipPlayer.paused && clipPlayer.dataset.id === x.id;
+      clipPlayer.pause();
+      for (const b of document.querySelectorAll('#saved-table .clip')) b.textContent = '▶';
+      if (playing) return;
+      player.pause();
+      Object.assign(clipPlayer, { src: url }).dataset.id = x.id;
+      clipPlayer.play();
+      e.target.closest('.clip').textContent = '❚❚';
+    } else if (e.target.closest('.open')) {
+      openSaved(x);
+    } else if (e.target.closest('.remove')) {
+      if (!confirm(`Delete the saved error ${x.clip}?`)) return;
+      try {
+        await api(`/api/saved/${encodeURIComponent(x.id)}`, undefined, 'DELETE');
+        savedItems = savedItems.filter((it) => it !== x);
+        renderSaved();
+        if (result) renderErrors();
+      } catch (err) { showError(err); }
+    }
+  });
+  $('#saved-table').addEventListener('change', async (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    const x = tr && e.target.classList.contains('note') && savedItems.find((it) => it.id === tr.dataset.id);
+    if (!x) return;
+    try {
+      Object.assign(x, await api(`/api/saved/${encodeURIComponent(x.id)}`, { note: e.target.value }, 'PATCH'));
+      setStatus('Note saved');
+    } catch (err) { showError(err); }
+  });
+}
+
 // ---- results toolbar & keys ---------------------------------------------------------------
 
 function bindResults() {
   $('#play-btn').addEventListener('click', togglePlay);
+  $('#restart-btn').addEventListener('click', playFromStart);
   player.addEventListener('play', () => { $('#play-btn').textContent = '❚❚'; });
   player.addEventListener('pause', () => { $('#play-btn').textContent = '▶'; });
   player.addEventListener('timeupdate', updateTime);
@@ -1330,6 +1636,8 @@ function bindResults() {
   $('#show-all').addEventListener('change', () => renderTimeline(true));
   $('#show-diff').addEventListener('change', (e) => { store.set('showDiff', e.target.checked); renderTimeline(true); });
   $('#show-diff').checked = store.get('showDiff', true);
+  $('#show-diar').addEventListener('change', (e) => { store.set('showDiar', e.target.checked); renderTimeline(true); });
+  $('#show-diar').checked = store.get('showDiar', true);
   $('#lane-size').value = laneSize;
   $('#lane-size').addEventListener('change', (e) => { laneSize = e.target.value; store.set('laneSize', laneSize); renderTimeline(true); });
   for (const b of document.querySelectorAll('[data-view]')) {
@@ -1367,6 +1675,7 @@ function bindResults() {
   }
   $('#errors').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-i]');
+    if (tr && e.target.closest('.save')) return toggleSave(result.score.regions[Number(tr.dataset.i)]);
     if (tr) focusRegion(result.score.regions[Number(tr.dataset.i)], Boolean(e.target.closest('.play')));
   });
 }
@@ -1399,6 +1708,7 @@ function bindKeys() {
     if (!result) return;
     const actions = {
       ' ': togglePlay,
+      Home: playFromStart,
       ArrowLeft: () => (e.shiftKey ? timeline.pan(-0.25) : timeline.seekBy(-SEEK_STEP)),
       ArrowRight: () => (e.shiftKey ? timeline.pan(0.25) : timeline.seekBy(SEEK_STEP)),
       '+': () => timeline.zoom(0.5),

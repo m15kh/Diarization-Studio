@@ -9,7 +9,11 @@ No database: the loaded model and recent model outputs live in memory only.
 from __future__ import annotations
 
 import argparse
+import csv
+import datetime
 import gc
+import io
+import json
 import os
 import shutil
 import subprocess
@@ -17,12 +21,13 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -31,6 +36,8 @@ import scoring
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 # uploads/audio and uploads/rttm sit side by side, so an uploaded reference is found next to its audio (../rttm)
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
+# saved errors: <id>.json (what, where, which model and settings) + <id>.wav (the audio around it) + saved.csv (all of them)
+SAVED_DIR = Path(__file__).resolve().parent.parent / "saved"
 UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints"}
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
 AUDIO_SUBDIRS = ("wav", "wavs", "audio")  # audio folders of a dataset (test/spk2/wav/): not part of a file's group
@@ -257,6 +264,128 @@ def pair(audio: str, prev_audio: str = "", ref: str = "", hyp: str = ""):
         "ref": follow(ref, [audio_dir, audio_dir.parent / "rttm", audio_dir / "rttm"]),
         "hyp": follow(hyp, []),
     }
+
+
+class SaveRequest(BaseModel):
+    audio: str
+    start: float
+    end: float
+    pad: float = 1.0  # seconds of audio kept before and after the error in the clip
+    group: str = ""
+    miss: float = 0.0
+    fa: float = 0.0
+    conf: float = 0.0
+    ref_speakers: list[str] = []
+    hyp_speakers: list[str] = []
+    note: str = ""
+    ref_rttm: str = ""
+    hyp_rttm: str = ""
+    checkpoint: str = ""
+    settings: dict = {}
+    file_der: float | None = None
+    segments: dict = {}  # {"ref": [[start, end, speaker], ...], "hyp": [...]} around the error
+
+
+class NoteRequest(BaseModel):
+    note: str
+
+
+SAVED_CSV_COLUMNS = ["id", "saved_at", "group", "file_id", "start", "end", "duration", "types", "miss", "fa", "conf",
+                     "ref_speakers", "hyp_speakers", "note", "file_der", "clip", "audio", "ref_rttm", "hyp_rttm", "checkpoint"]
+
+
+@app.get("/api/saved")
+def saved_list():
+    """Every saved error, newest first."""
+    return {"dir": str(SAVED_DIR), "items": saved_items()}
+
+
+@app.post("/api/saved")
+def save_error(req: SaveRequest):
+    """Save an error region: its audio (with `pad` seconds around it) as a WAV, and everything about it as JSON."""
+    import soundfile
+
+    audio = existing(req.audio, "Audio")
+    file_id = Path(audio).stem
+    info = soundfile.info(audio)
+    clip_start, clip_end = max(0.0, req.start - req.pad), min(info.duration, req.end + req.pad)
+    data, sr = soundfile.read(audio, start=int(clip_start * info.samplerate), stop=int(clip_end * info.samplerate))
+    types = [t for t in ("miss", "fa", "conf") if getattr(req, t) > 0]
+    item_id = f"{file_id}_{req.start:.2f}s_{'-'.join(types) or 'error'}_{uuid.uuid4().hex[:4]}"
+    SAVED_DIR.mkdir(parents=True, exist_ok=True)
+    soundfile.write(SAVED_DIR / f"{item_id}.wav", data, sr)
+    item = {
+        "id": item_id, "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        **req.model_dump(exclude={"pad", "audio"}), "audio": audio, "file_id": file_id, "types": types,
+        "duration": round(req.end - req.start, 3), "clip": f"{item_id}.wav",
+        "clip_start": round(clip_start, 3), "clip_end": round(clip_end, 3),
+    }
+    (SAVED_DIR / f"{item_id}.json").write_text(json.dumps(item, ensure_ascii=False, indent=1))
+    write_saved_csv()
+    return item
+
+
+@app.patch("/api/saved/{item_id}")
+def saved_note(item_id: str, req: NoteRequest):
+    path = saved_path(item_id, ".json")
+    item = json.loads(path.read_text())
+    item["note"] = req.note
+    path.write_text(json.dumps(item, ensure_ascii=False, indent=1))
+    write_saved_csv()
+    return item
+
+
+@app.delete("/api/saved/{item_id}")
+def saved_delete(item_id: str):
+    saved_path(item_id, ".json").unlink()
+    (SAVED_DIR / f"{item_id}.wav").unlink(missing_ok=True)
+    write_saved_csv()
+    return {"ok": True}
+
+
+@app.get("/api/saved/{item_id}/clip")
+def saved_clip(item_id: str):
+    return FileResponse(saved_path(item_id, ".wav"))
+
+
+@app.get("/api/saved-export")
+def saved_export():
+    """All saved errors in one zip: the clips, every JSON, and saved.csv."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(SAVED_DIR.glob("*")) if SAVED_DIR.is_dir() else []:
+            if f.suffix in (".wav", ".json", ".csv"):
+                z.write(f, f.name)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="saved_errors_{stamp}.zip"'})
+
+
+def saved_items() -> list[dict]:
+    items = []
+    for f in SAVED_DIR.glob("*.json") if SAVED_DIR.is_dir() else []:
+        try:
+            items.append(json.loads(f.read_text()))
+        except (OSError, ValueError):
+            continue
+    return sorted(items, key=lambda x: x.get("saved_at", ""), reverse=True)
+
+
+def saved_path(item_id: str, suffix: str) -> Path:
+    path = SAVED_DIR / f"{Path(item_id).name}{suffix}"  # .name: no way out of the folder
+    if not path.is_file():
+        raise HTTPException(404, f"No saved error {item_id}")
+    return path
+
+
+def write_saved_csv() -> None:
+    """saved.csv: one row per saved error, so they can be searched outside the UI too."""
+    rows = saved_items()
+    with (SAVED_DIR / "saved.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, SAVED_CSV_COLUMNS, extrasaction="ignore")
+        w.writeheader()
+        for item in rows:
+            w.writerow({**item, **{k: " ".join(item.get(k, [])) for k in ("types", "ref_speakers", "hyp_speakers")}})
 
 
 @app.post("/api/upload")
