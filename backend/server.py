@@ -435,6 +435,22 @@ def audio_file(path: str):
     return FileResponse(p)
 
 
+@app.get("/api/clip")
+def audio_clip(path: str, start: float, end: float):
+    """A section of an audio file as MP3 (for saving the A–B loop)."""
+    audio = existing(path, "Audio")
+    if end <= start:
+        raise HTTPException(400, "The section is empty: B must come after A")
+    if shutil.which("ffmpeg") is None:
+        raise HTTPException(500, "Cannot make an MP3: ffmpeg is not installed on the server.")
+    proc = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", audio,
+                           "-vn", "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3", "pipe:1"], capture_output=True)
+    if proc.returncode != 0:
+        raise HTTPException(500, f"Could not make the MP3: {proc.stderr.decode(errors='replace').strip() or 'ffmpeg failed'}")
+    name = f"{Path(audio).stem}_{start:.2f}-{end:.2f}s.mp3"
+    return Response(proc.stdout, media_type="audio/mpeg", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @app.exception_handler(ValueError)
 async def bad_input(_request, exc: ValueError):
     return JSONResponse(status_code=400, content={"detail": str(exc)})

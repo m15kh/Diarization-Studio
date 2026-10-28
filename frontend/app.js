@@ -83,7 +83,7 @@ let runSeq = 0;
 let shown = null;       // { audio, ref, hyp } of `result`, re-scored when the settings change
 let batch = null;       // folder: { path, ref_dir, hyp_dir, fields, checkpoint, active, rows: [{ audio, name, group, ref, hyp, res?, error? }] }
 let batchSeq = 0;
-let folderSort = 'name';
+let folderSort = { col: 'file', desc: false };  // folder table: click a column header to sort by it, again to flip
 let setView = store.get('setView', 'abs');  // per-set chart: 'abs' (% of speech) or 'share' (share of the error)
 let errorSort = 'time';
 const errorTypes = new Set(store.get('errorTypes', ['miss', 'fa', 'conf']));  // error types the list and ◀ ▶ show
@@ -340,10 +340,9 @@ function renderFolder() {
   renderSets();
 
   const hasRef = rows.some((r) => r.ref);
-  const order = [...shownIdx];
-  if (folderSort === 'der') order.sort((i, j) => (b.rows[j].res?.score?.der ?? -1) - (b.rows[i].res?.score?.der ?? -1));
   const hasGroup = !b.set && rows.some((r) => r.group);  // one set: its name is in the selector
   const head = ['file', ...(hasGroup ? ['set'] : []), 'length', 'speakers', ...(hasRef ? ['DER', 'missed', 'false alarm', 'confusion', 'JER'] : ['speech', 'overlap']), 'inference'];
+  const order = sortFolder(b, shownIdx, head.includes(folderSort.col) ? folderSort : { col: 'file', desc: false });
   const body = order.map((i) => {
     const r = b.rows[i], res = r.res, s = res?.score;
     const cls = i === b.active ? ' class="active"' : '';
@@ -370,7 +369,10 @@ function renderFolder() {
       ${nums.join('')}<td class="num">${infer}</td></tr>`;
   });
   $('#folder-table').innerHTML = `<table class="table">
-    <thead><tr>${head.map((h, k) => `<th${k && h !== 'set' ? ' class="num"' : ''}>${h}</th>`).join('')}</tr></thead>
+    <thead><tr>${head.map((h, k) => {
+      const on = h === folderSort.col, arrow = on ? (folderSort.desc ? ' ▾' : ' ▴') : '';
+      return `<th data-sort="${h}" class="sortable${k && h !== 'set' ? ' num' : ''}${on ? ' on' : ''}" title="Sort by ${h}">${h}${arrow}</th>`;
+    }).join('')}</tr></thead>
     <tbody>${body.join('')}</tbody></table>`;
   // keep the open file in view inside the table (scrollIntoView would also scroll the page)
   const box = $('#folder-table'), tr = box.querySelector('tr.active');
@@ -380,6 +382,39 @@ function renderFolder() {
       box.scrollTop = tr.offsetTop - box.clientHeight / 2;
     }
   }
+}
+
+// A row's value in a folder table column, for sorting (null: no value yet, sorted last).
+const FOLDER_COLS = {
+  file: (r) => basename(r.audio).toLowerCase(),
+  set: (r) => r.group || '',
+  length: (r) => r.res?.duration,
+  speakers: (r) => r.res?.hyp.speakers,
+  DER: (r) => r.res?.score?.der,
+  missed: (r) => r.res?.score?.miss,
+  'false alarm': (r) => r.res?.score?.fa,
+  confusion: (r) => r.res?.score?.conf,
+  JER: (r) => r.res?.score?.jer,
+  speech: (r) => r.res?.hyp.speech,
+  overlap: (r) => (r.res?.hyp.speech ? r.res.hyp.overlap / r.res.hyp.speech : null),
+  inference: (r) => (r.res?.source === 'model' ? r.res.infer_time : null),
+};
+
+function sortFolder(b, idx, { col, desc }) {
+  const get = FOLDER_COLS[col] ?? FOLDER_COLS.file, dir = desc ? -1 : 1;
+  return idx.map((i) => [i, get(b.rows[i])]).sort(([i, x], [j, y]) => {
+    if (x == null || y == null) return x == null && y == null ? i - j : x == null ? 1 : -1;
+    const d = typeof x === 'string' ? x.localeCompare(y, undefined, { numeric: true }) : x - y;
+    return d ? d * dir : i - j;
+  }).map(([i]) => i);
+}
+
+function setFolderSort(col, desc) {
+  folderSort = { col, desc };
+  for (const btn of document.querySelectorAll('[data-fsort]')) {
+    btn.classList.toggle('on', btn.dataset.fsort === (col === 'file' && !desc ? 'name' : col === 'DER' && desc ? 'der' : ''));
+  }
+  renderFolder();
 }
 
 const FOLDER_MEMORY = 50;  // folders whose last opened file is remembered
@@ -1121,6 +1156,17 @@ function showLoop(loop) {
   btn.textContent = !loop ? 'A–B' : loop.length === 1 ? `A ${fmtTime(loop[0])} · set B` : `↻ ${fmtTime(loop[0])} – ${fmtTime(loop[1])} ✕`;
   btn.title = !loop ? 'A–B loop (l): set A here, then B; alt+drag on the timeline also selects a loop'
     : loop.length === 1 ? 'Set B at the playback position and start looping (l)' : 'Stop looping (l)';
+  $('#loop-mp3').hidden = loop?.length !== 2;
+}
+
+// Save the A–B section of the open file as MP3 (cut and encoded by the server).
+function saveLoopMp3() {
+  const loop = timeline.loop;
+  if (loop?.length !== 2 || !result) return;
+  const a = document.createElement('a');
+  a.href = `/api/clip?path=${encodeURIComponent(result.audio)}&start=${loop[0].toFixed(3)}&end=${loop[1].toFixed(3)}`;
+  a.click();
+  setStatus(`Saving ${fmtTime(loop[0])} – ${fmtTime(loop[1])} as MP3`);
 }
 
 function togglePlay() {
@@ -1355,15 +1401,16 @@ function bindInputs() {
   $('#folder-csv').addEventListener('click', () => downloadFolder('csv'));
   $('#folder-rttm').addEventListener('click', () => downloadFolder('rttm'));
   $('#folder-table').addEventListener('click', (e) => {
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const col = th.dataset.sort;  // first click: names A→Z, numbers largest (worst) first; again: flip
+      return setFolderSort(col, col === folderSort.col ? !folderSort.desc : col !== 'file' && col !== 'set');
+    }
     const tr = e.target.closest('tr[data-f]');
     if (tr) openFolderFile(Number(tr.dataset.f), true);
   });
   for (const btn of document.querySelectorAll('[data-fsort]')) {
-    btn.addEventListener('click', () => {
-      folderSort = btn.dataset.fsort;
-      for (const b of document.querySelectorAll('[data-fsort]')) b.classList.toggle('on', b === btn);
-      renderFolder();
-    });
+    btn.addEventListener('click', () => (btn.dataset.fsort === 'der' ? setFolderSort('DER', true) : setFolderSort('file', false)));
   }
 
   // file browser dialog
@@ -1736,6 +1783,7 @@ function bindResults() {
   $('#play-btn').addEventListener('click', togglePlay);
   $('#restart-btn').addEventListener('click', playFromStart);
   $('#loop-btn').addEventListener('click', toggleLoop);
+  $('#loop-mp3').addEventListener('click', saveLoopMp3);
   showLoop(null);
   player.addEventListener('play', () => { $('#play-btn').textContent = '❚❚'; });
   player.addEventListener('pause', () => { $('#play-btn').textContent = '▶'; });

@@ -271,6 +271,8 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 }
 .table td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .table th.num { text-align: right; }
+.table th.sortable { cursor: pointer; user-select: none; }
+.table th.sortable:hover, .table th.on { color: var(--text); }
 .table td.num { text-align: right; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .table .btn.icon { width: 26px; height: 24px; font-size: 10px; }
 #folder-metrics:not(:empty) { margin-bottom: 12px; }
