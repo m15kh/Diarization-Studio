@@ -6,6 +6,10 @@
 //     probs?, step?, onset?, offset?, unscored?, highlight?, band?, muted?, diff?: { miss, extra }, tag?: 'ref' | 'pred' }
 // A 'stack' row draws several thin tracks in one lane: tracks: [{ color | colorVar, segs, label?, tag?, bgVar? }, ...]
 // (a track label replaces the row label; bgVar gives a track its own background).
+// `spk` names the speaker a row belongs to: while the pointer is on an error mark, `focusAt(t)` returns the speakers
+// behind that error and every other speaker row is shaded. Clicking an error mark pins it: the shading stays (so the
+// lanes can be scrolled to) and the mark plays in a loop, until a click elsewhere or `unpin()`. Clicking a segment in a
+// speaker row plays just that segment.
 
 export const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2',
   '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
@@ -25,8 +29,8 @@ export function fmtTime(t, digits = 2) {
 }
 
 export class Timeline {
-  constructor({ canvas, overview, tooltip, player, describe, onLoop }) {
-    Object.assign(this, { canvas, overview, tooltip, player, describe, onLoop });
+  constructor({ canvas, overview, tooltip, player, describe, onLoop, focusAt }) {
+    Object.assign(this, { canvas, overview, tooltip, player, describe, onLoop, focusAt });
     this.layer = document.createElement('canvas');  // cached static drawing
     this.rows = [];
     this.marks = [];
@@ -35,6 +39,8 @@ export class Timeline {
     this.wave = null;
     this.waveNote = '';
     this.hoverX = null;
+    this.focus = null;   // speaker keys to keep lit while hovering an error mark, see focusAt
+    this.pin = null;     // clicked error mark: { loop: [start, end], focus }
     this.drag = null;
     this.sel = null;
     this.follow = true;  // during playback, scroll the view along with the cursor
@@ -60,7 +66,7 @@ export class Timeline {
         return { ...row, h: LANE_KINDS.has(row.kind) ? Math.round(h * laneScale) : h };
       });
     this.marks = marks || [];
-    if (!(keepView && sameLength)) this.view = [0, duration];
+    if (!(keepView && sameLength)) { this.view = [0, duration]; this.pin = null; }
     this._layout();
   }
 
@@ -123,9 +129,23 @@ export class Timeline {
 
   // A–B loop: playback jumps back to A whenever it reaches B.
   setLoop(loop) {
+    if (this.pin && loop !== this.pin.loop) this.pin = null;  // the loop moved off the pinned error mark
     this.loop = loop;
     this.redraw = true;
     this.onLoop?.(loop);
+  }
+
+  // Pin an error mark: loop it and keep the speakers behind the error at `t` lit.
+  pinError(seg, t) {
+    const loop = [seg[0], seg[1]];
+    this.setLoop(loop);
+    this.pin = { loop, focus: this.focusAt?.(t) ?? null };
+    this.seek(seg[0]);
+    this.player.play();
+  }
+
+  unpin() {
+    if (this.pin) this.setLoop(null);
   }
 
   playRange(a, b) {
@@ -193,7 +213,7 @@ export class Timeline {
     return {
       v, text: v('--text'), muted: v('--muted'), grid: v('--grid'), wave: v('--wave'), accent: v('--accent'),
       stripe: v('--stripe'), unscored: v('--unscored'), miss: v('--miss'), font: v('--font'), mono: v('--mono'),
-      lane: v('--lane'), highlight: v('--highlight'),
+      lane: v('--lane'), highlight: v('--highlight'), bg: v('--panel'),
     };
   }
 
@@ -505,9 +525,25 @@ export class Timeline {
       }
       ctx.setLineDash([]);
     }
+    if (this.focus || this.pin?.focus) this._drawFocus(ctx, th, this.focus || this.pin.focus);
     if (this.hoverX != null) line(Math.round(this.hoverX) + 0.5, th.muted, 1);
     const t = this.player.currentTime;
     if (t >= this.view[0] && t <= this.view[1]) line(this.timeToX(t), th.accent, 2);
+  }
+
+  // Shade the speaker rows not behind the hovered error, and mark the ones that are with an accent bar.
+  _drawFocus(ctx, th, focus) {
+    for (const row of this.rows) {
+      if (!row.spk) continue;
+      if (focus.has(row.spk)) {
+        ctx.fillStyle = th.accent;
+        ctx.fillRect(2, row.y + 2, 3, row.h - 4);
+      } else {
+        ctx.globalAlpha = 0.72; ctx.fillStyle = th.bg;
+        ctx.fillRect(0, row.y, this.width, row.h);
+        ctx.globalAlpha = 1;
+      }
+    }
   }
 
   _drawOverview() {
@@ -577,7 +613,9 @@ export class Timeline {
         }
       }
       this.hoverX = e.offsetX >= GUTTER ? e.offsetX : null;
-      if (!d) c.style.cursor = this._errorSegAt(e.offsetX, e.offsetY) ? 'pointer' : '';
+      const onError = !d && this._errorSegAt(e.offsetX, e.offsetY);
+      if (!d) c.style.cursor = onError || this._speakerSegAt(e.offsetX, e.offsetY) ? 'pointer' : '';
+      this.focus = onError ? this.focusAt?.(this.xToTime(e.offsetX)) ?? null : null;
       this.redraw = true;
       this._showTooltip(e);
     });
@@ -595,14 +633,20 @@ export class Timeline {
           this.player.play();
         } else if (t - s > 0.01) this.setView(s, t);
       } else if (!d.moved && e.offsetX >= GUTTER) {
-        const seg = this._errorSegAt(e.offsetX, e.offsetY);  // a click on an error mark plays just that part
-        if (seg) this.playRange(seg[0], seg[1]);
-        else this.seek(this.xToTime(e.offsetX));
+        const seg = this._errorSegAt(e.offsetX, e.offsetY);  // a click on an error mark pins and loops it
+        const spkSeg = !seg && this._speakerSegAt(e.offsetX, e.offsetY);  // a click on a speaker segment plays it
+        if (seg) this.pinError(seg, this.xToTime(e.offsetX));
+        else {
+          this.unpin();
+          if (spkSeg) this.playRange(spkSeg[0], spkSeg[1]);
+          else this.seek(this.xToTime(e.offsetX));
+        }
       }
       this.redraw = true;
     });
     c.addEventListener('pointerleave', () => {
       this.hoverX = null;
+      this.focus = null;
       this.tooltip.hidden = true;
       this.redraw = true;
     });
@@ -643,6 +687,21 @@ export class Timeline {
     if (!segs) return null;
     const t = this.xToTime(x), slack = (3 * (this.view[1] - this.view[0])) / this.plotWidth;  // 3 px, for thin marks
     return segs.find(([s, e]) => t >= s - slack && t <= e + slack) || null;
+  }
+
+  // The speaker segment under a point (a missed / extra mark first, then the speaker's own segment), or null.
+  _speakerSegAt(x, y) {
+    if (x < GUTTER || !this.duration) return null;
+    const row = this.rows.find((r) => y >= r.y && y < r.y + r.h);
+    if (!row?.spk) return null;
+    let segs = row.segs || [];
+    if (row.kind === 'stack') {  // simple view: the reference or the prediction track
+      const top = row.y + 3, h = (row.h - 6) / row.tracks.length;
+      segs = row.tracks[Math.min(row.tracks.length - 1, Math.max(0, Math.floor((y - top) / h)))].segs;
+    }
+    const t = this.xToTime(x), slack = (3 * (this.view[1] - this.view[0])) / this.plotWidth;  // 3 px, for thin marks
+    const find = (list) => list.find(([s, e]) => t >= s - slack && t <= e + slack);
+    return (row.diff && (find(row.diff.miss) || find(row.diff.extra))) || find(segs) || null;
   }
 
   _showTooltip(e) {

@@ -252,6 +252,7 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
 }
 #tooltip .k { display: inline-block; width: 40px; color: var(--muted); }
+#tooltip .err-type { font-weight: 600; margin-right: 2px; }
 .dot { display: inline-block; width: 8px; height: 8px; margin: 0 4px 0 2px; border-radius: 2px; }
 
 /* tables */
@@ -278,6 +279,16 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 #folder-table tr.active td { background: var(--accent-soft); }
 #folder-table td.fail { color: var(--miss); white-space: normal; }
 #folder-table .warn { color: var(--miss); }
+/* error heat: a tint layered over the row background, so hover / active still show */
+#folder-table td.heat {
+  --heat-bg: color-mix(in srgb, var(--heat-color) var(--heat), transparent);
+  background-image: linear-gradient(var(--heat-bg), var(--heat-bg));
+}
+#folder-table td.grade { border-left: 3px solid var(--grade); }
+#folder-table td.der { font-weight: 700; color: var(--grade); }
+#folder-table .good { --grade: var(--ok); }
+#folder-table .fair { --grade: var(--fa); }
+#folder-table .poor { --grade: var(--miss); }
 #errors tr[data-i] { cursor: pointer; }
 #errors tr[data-i]:hover td { background: var(--label-bg); }
 #errors tr.active td { background: var(--accent-soft); }

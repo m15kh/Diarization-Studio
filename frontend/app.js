@@ -66,6 +66,7 @@ const store = {
 const player = $('#player');
 const timeline = new Timeline({
   canvas: $('#timeline'), overview: $('#overview'), tooltip: $('#tooltip'), player, describe: describeTime, onLoop: showLoop,
+  focusAt: errorFocus,
 });
 
 let result = null;      // last /api/run response
@@ -347,7 +348,9 @@ function renderFolder() {
     const r = b.rows[i], res = r.res, s = res?.score;
     const cls = i === b.active ? ' class="active"' : '';
     const lead = hasGroup ? 2 : 1;
-    const first = `<td title="${esc(r.audio)}">${esc(basename(r.audio))}</td>${hasGroup ? `<td>${esc(r.group)}</td>` : ''}`;
+    const grade = derGrade(res?.score?.der);
+    const first = `<td title="${esc(r.audio)}"${grade ? ` class="grade ${grade}"` : ''}>${esc(basename(r.audio))}</td>${
+      hasGroup ? `<td>${esc(r.group)}</td>` : ''}`;
     if (r.error) return `<tr data-f="${i}"${cls}>${first}<td class="fail" colspan="${head.length - lead}">${esc(r.error)}</td></tr>`;
     if (!res) {
       const wait = r === b.current ? '<span class="spinner"></span>' : '';
@@ -357,12 +360,14 @@ function renderFolder() {
       ? speakerCount(res.ref.speakers, res.hyp.speakers)
       : res.hyp.speakers;
     const nums = hasRef
-      ? (s ? [pct(s.der), pct(s.miss), pct(s.fa), pct(s.conf), pct(s.jer)] : ['–', '–', '–', '–', '–'])
-      : [secs(res.hyp.speech), pct(res.hyp.speech ? res.hyp.overlap / res.hyp.speech : null, 1)];
+      ? (s ? [heatCell(s.der, '--miss', 0.3, `der ${grade}`), heatCell(s.miss, '--miss', 0.15), heatCell(s.fa, '--fa', 0.15),
+              heatCell(s.conf, '--conf', 0.15), `<td class="num">${pct(s.jer)}</td>`]
+           : Array(5).fill('<td class="num">–</td>'))
+      : [secs(res.hyp.speech), pct(res.hyp.speech ? res.hyp.overlap / res.hyp.speech : null, 1)].map((x) => `<td class="num">${x}</td>`);
     const infer = r === b.current ? '<span class="spinner"></span>'
       : res.source === 'model' ? `${res.infer_time.toFixed(2)} s` : 'RTTM';
     return `<tr data-f="${i}"${cls}>${first}<td class="num">${fmtTime(res.duration, 1)}</td><td class="num">${spk}</td>
-      ${nums.map((x) => `<td class="num">${x}</td>`).join('')}<td class="num">${infer}</td></tr>`;
+      ${nums.join('')}<td class="num">${infer}</td></tr>`;
   });
   $('#folder-table').innerHTML = `<table class="table">
     <thead><tr>${head.map((h, k) => `<th${k && h !== 'set' ? ' class="num"' : ''}>${h}</th>`).join('')}</tr></thead>
@@ -448,6 +453,17 @@ function aggregate(rows) {
 const ERROR_PARTS = [['miss', 'missed', '--miss'], ['fa', 'false alarm', '--fa'], ['conf', 'confusion', '--conf']];
 
 // Per set (sub-folder, e.g. spk2 ... spk8): one bar split into missed / false alarm / confusion, and a table.
+// DER grade of a file: 'good' under 5%, 'fair' under 15%, 'poor' from there (colors the file name and the DER).
+function derGrade(der) {
+  return der == null ? '' : der < 0.05 ? 'good' : der < 0.15 ? 'fair' : 'poor';
+}
+
+// A table cell tinted in `colorVar`, the stronger the larger `x` (full strength at `full`), so bad files stand out.
+function heatCell(x, colorVar, full, cls = '') {
+  const heat = Math.round(Math.min(1, x / full) * 45);
+  return `<td class="num heat ${cls}" style="--heat-color: var(${colorVar}); --heat: ${heat}%">${pct(x)}</td>`;
+}
+
 function renderSets() {
   const b = batch;
   const groups = [...new Set(b.rows.map((r) => r.group))].filter(Boolean);
@@ -677,12 +693,10 @@ function renderTimeline(keepView) {
   const rows = [];
   let hidden = 0;
   const map = res.score?.hyp_to_ref || [];
-  // a predicted speaker mapped to a reference speaker is shown / hidden together with it
-  const hypKey = (h) => (map[h] != null ? `ref:${res.ref.names[map[h]]}` : `hyp:${res.hyp.names[h]}`);
   const shown = (key) => !hiddenSpeakers.has(key);
   const chips = [];
   const hypRow = (h, label, band) => ({
-    kind: 'hyp', label, band, color: v.hypColor[h], segs: v.hypSegs[h],
+    kind: 'hyp', label, band, spk: hypKey(h), color: v.hypColor[h], segs: v.hypSegs[h],
     probs: v.probs?.[h], step: res.frame_step, onset, offset, muted: !v.hypSegs[h].length,
   });
 
@@ -694,7 +708,7 @@ function renderTimeline(keepView) {
     if (!(showAll || v.hypVisible[h] || res.score?.hyp_to_ref[h] != null)) return;
     if (!res.score) chips.push({ key: hypKey(h), label: name, color: v.hypColor[h] });
     if (!showDiar || !shown(hypKey(h))) return;
-    rows.push({ kind: 'seg', label: name, color: v.hypColor[h], segs: v.hypSegs[h], highlight: v.hypOverlap,
+    rows.push({ kind: 'seg', label: name, spk: hypKey(h), color: v.hypColor[h], segs: v.hypSegs[h], highlight: v.hypOverlap,
                 muted: !v.hypSegs[h].length });
   });
 
@@ -711,11 +725,11 @@ function renderTimeline(keepView) {
       chips.push({ key: `ref:${name}`, label: name, color: v.refColor[r] });
       if (!shown(`ref:${name}`)) return;
       const band = r % 2 === 1;
-      rows.push({ kind: 'ref', label: name, tag: 'ref', color: v.refColor[r], segs: v.refSegs[r], band });
+      rows.push({ kind: 'ref', label: name, tag: 'ref', spk: `ref:${name}`, color: v.refColor[r], segs: v.refSegs[r], band });
       const h = map.indexOf(r);
       rows.push(h >= 0
         ? { ...hypRow(h, res.hyp.names[h], band), tag: 'pred', diff: diff(v.refSegs[r], v.hypSegs[h]) }
-        : { kind: 'hyp', label: 'not detected', tag: 'pred', color: v.refColor[r], segs: [], band, muted: true,
+        : { kind: 'hyp', label: 'not detected', tag: 'pred', spk: `ref:${name}`, color: v.refColor[r], segs: [], band, muted: true,
             diff: diff(v.refSegs[r], []) });
     });
     res.hyp.names.forEach((name, h) => {
@@ -743,7 +757,7 @@ function renderTimeline(keepView) {
   if (chips.length < 2 && chips.some((c) => hiddenSpeakers.has(c.key))) {
     return setHiddenSpeakers([...hiddenSpeakers].filter((k) => !chips.some((c) => c.key === k)));
   }
-  if (viewMode === 'simple') rows.splice(0, rows.length, ...simpleRows(shown, hypKey));
+  if (viewMode === 'simple') rows.splice(0, rows.length, ...simpleRows(shown));
   renderSpeakerFilter(chips);
   $('#show-all-wrap').hidden = !res.probs;
   $('#show-diff-wrap').hidden = !res.score;
@@ -759,7 +773,7 @@ function renderTimeline(keepView) {
 
 // The simple layout: one compact lane per speaker with the reference on top and its matched prediction right
 // below (same color; red / amber where they differ), then one error lane.
-function simpleRows(shown, hypKey) {
+function simpleRows(shown) {
   const res = result, v = view;
   const showAll = $('#show-all').checked;
   const visible = (h) => (showAll || v.hypVisible[h]) && shown(hypKey(h));
@@ -775,8 +789,8 @@ function simpleRows(shown, hypKey) {
     miss: subtractSegs(subtractSegs(mergeSegs(refSegs), mergeSegs(hypSegs)), unscored),
     extra: subtractSegs(subtractSegs(mergeSegs(hypSegs), mergeSegs(refSegs)), unscored),
   } : null);
-  const pair = (refName, hypName, color, refSegs, hypSegs, band) => ({
-    kind: 'stack', label: refName, color, band, h: 36, diff: diff(refSegs, hypSegs),
+  const pair = (spk, refName, hypName, color, refSegs, hypSegs, band) => ({
+    kind: 'stack', label: refName, spk, color, band, h: 36, diff: diff(refSegs, hypSegs),
     tracks: [{ color, segs: refSegs, label: refName, tag: 'ref', bgVar: '--track-ref' },
              { color, segs: hypSegs, label: hypName, tag: 'pred', bgVar: '--track-pred' }],
   });
@@ -784,11 +798,11 @@ function simpleRows(shown, hypKey) {
   res.ref.names.forEach((name, r) => {
     if (!shown(`ref:${name}`)) return;
     const h = map.indexOf(r);
-    rows.push(pair(name, h >= 0 ? res.hyp.names[h] : 'not detected', v.refColor[r], v.refSegs[r],
+    rows.push(pair(`ref:${name}`, name, h >= 0 ? res.hyp.names[h] : 'not detected', v.refColor[r], v.refSegs[r],
                    h >= 0 ? v.hypSegs[h] : [], r % 2 === 1));
   });
   res.hyp.names.forEach((name, h) => {  // predicted speakers with no reference speaker
-    if (map[h] == null && visible(h)) rows.push(pair('— no reference', `${name} (extra)`, v.hypColor[h], [], v.hypSegs[h], false));
+    if (map[h] == null && visible(h)) rows.push(pair(hypKey(h), '— no reference', `${name} (extra)`, v.hypColor[h], [], v.hypSegs[h], false));
   });
   rows.push(...overlapRows(diff));
   const scoring = `collar ±${res.score.collar} s${res.score.ignore_overlap ? ' · overlap not scored' : ''}`;
@@ -952,6 +966,34 @@ function renderSpeakers() {
   }
 }
 
+// A predicted speaker mapped to a reference speaker is shown / hidden (and focused) together with it.
+function hypKey(h) {
+  const map = result.score?.hyp_to_ref || [];
+  return map[h] != null ? `ref:${result.ref.names[map[h]]}` : `hyp:${result.hyp.names[h]}`;
+}
+
+// Which speakers cause the error at `t`: reference speakers whose matched prediction is silent and predicted speakers
+// whose matched reference is silent; paired up they are confusion, the rest missed / false alarm (as DER counts them).
+function errorSpeakers(t) {
+  const res = result, v = view, map = res.score.hyp_to_ref;
+  const on = (segs) => segs.some(([s, e]) => t >= s && t < e);
+  const hypOn = res.hyp.names.map((_, h) => on(v.hypSegs[h]));
+  const refOn = res.ref.names.map((_, r) => on(v.refSegs[r]));
+  const lost = refOn.flatMap((a, r) => (a && !hypOn[map.indexOf(r)] ? [r] : []));
+  const stray = hypOn.flatMap((a, h) => (a && !(map[h] != null && refOn[map[h]]) ? [h] : []));
+  const n = Math.min(lost.length, stray.length);
+  return { conf: lost.slice(0, n).map((r, i) => [r, stray[i]]), miss: lost.slice(n), fa: stray.slice(n) };
+}
+
+// While the pointer is on an error mark: the speaker keys (see `spk` on the rows) behind the error at `t`, or null.
+function errorFocus(t) {
+  if (!result?.score) return null;
+  const { conf, miss, fa } = errorSpeakers(t);
+  const keys = new Set([...miss.map((r) => `ref:${result.ref.names[r]}`), ...fa.map(hypKey),
+                        ...conf.flatMap(([r, h]) => [`ref:${result.ref.names[r]}`, hypKey(h)])]);
+  return keys.size ? keys : null;
+}
+
 function describeTime(t) {
   const res = result, v = view;
   if (!res) return '';
@@ -971,8 +1013,18 @@ function describeTime(t) {
   lines.push(`<div><span class="k">pred</span>${pred.join(' ') || '<i>silence</i>'}</div>`);
   if (res.score) {
     const L = res.score.lanes;
-    const errors = [['missed', L.miss], ['false alarm', L.fa], ['confusion', L.conf]].filter(([, s]) => on(s)).map(([n]) => n);
-    if (errors.length) lines.push(`<div><span class="k">error</span>${errors.join(', ')}</div>`);
+    const who = errorSpeakers(t), map = res.score.hyp_to_ref;
+    const ref = (r) => `${dot(v.refColor[r])}${esc(res.ref.names[r])}`;
+    const hyp = (h) => `${dot(v.hypColor[h])}${esc(res.hyp.names[h])}`;
+    const silent = (name) => ` <span class="muted">(${esc(name)} silent)</span>`;
+    // e.g. "missed spk1 (speaker_0 silent)", "confusion spk0 → speaker_1", "false alarm speaker_2"
+    const errors = [
+      ['missed', L.miss, who.miss.map((r) => ref(r) + (map.includes(r) ? silent(res.hyp.names[map.indexOf(r)]) : ''))],
+      ['false alarm', L.fa, who.fa.map((h) => hyp(h) + (map[h] != null ? silent(res.ref.names[map[h]]) : ''))],
+      ['confusion', L.conf, who.conf.map(([r, h]) => `${ref(r)} → ${hyp(h)}`)],
+    ].filter(([, segs]) => on(segs));
+    errors.forEach(([name, , spk], i) => lines.push(
+      `<div><span class="k">${i ? '' : 'error'}</span><span class="err-type">${name}</span> ${spk.join(' ')}</div>`));
     if (on(L.unscored)) lines.push('<div class="muted">inside collar · not scored</div>');
   }
   return lines.join('');
@@ -1784,6 +1836,7 @@ function bindKeys() {
     const actions = {
       ' ': togglePlay,
       l: toggleLoop,
+      Escape: () => timeline.unpin(),
       Home: playFromStart,
       ArrowLeft: () => (e.shiftKey ? timeline.pan(-0.25) : timeline.seekBy(-SEEK_STEP)),
       ArrowRight: () => (e.shiftKey ? timeline.pan(0.25) : timeline.seekBy(SEEK_STEP)),
