@@ -9,7 +9,7 @@
 // `spk` names the speaker a row belongs to: while the pointer is on an error mark, `focusAt(t)` returns the speakers
 // behind that error and every other speaker row is shaded. Clicking an error mark pins it: the shading stays (so the
 // lanes can be scrolled to) and the mark plays in a loop, until a click elsewhere or `unpin()`. Clicking a segment in a
-// speaker row plays just that segment; clicking a `highlight` column (overlapped speech) plays just that overlap.
+// speaker row plays just that segment; clicking a `highlight` column (overlapped speech) loops it like an error mark.
 
 export const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2',
   '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
@@ -634,13 +634,12 @@ export class Timeline {
         } else if (t - s > 0.01) this.setView(s, t);
       } else if (!d.moved && e.offsetX >= GUTTER) {
         const seg = this._errorSegAt(e.offsetX, e.offsetY);  // a click on an error mark pins and loops it
-        const overlap = !seg && this._highlightAt(e.offsetX, e.offsetY);  // a click on an overlap column plays the overlap
+        const overlap = !seg && this._highlightAt(e.offsetX, e.offsetY);  // a click on an overlap column loops it too
         const spkSeg = !seg && !overlap && this._speakerSegAt(e.offsetX, e.offsetY);  // a click on a speaker segment plays it
-        if (seg) this.pinError(seg, this.xToTime(e.offsetX));
+        if (seg || overlap) this.pinError(seg || overlap, this.xToTime(e.offsetX));
         else {
           this.unpin();
-          if (overlap) this.playRange(overlap[0], overlap[1]);
-          else if (spkSeg) this.playRange(spkSeg[0], spkSeg[1]);
+          if (spkSeg) this.playRange(spkSeg[0], spkSeg[1]);
           else this.seek(this.xToTime(e.offsetX));
         }
       }

@@ -25,7 +25,7 @@ class Diarizer:
 
         start = time.time()
         if path.endswith(".nemo"):
-            model = SortformerEncLabelModel.restore_from(restore_path=path, map_location=self.device)
+            model = SortformerEncLabelModel.restore_from(restore_path=path, map_location=self.device, strict=False)
         elif path.endswith(".ckpt"):
             model = SortformerEncLabelModel.load_from_checkpoint(
                 checkpoint_path=path, map_location=self.device, strict=False

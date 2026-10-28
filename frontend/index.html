@@ -34,6 +34,20 @@
         </div>
 
         <div class="field">
+          <label for="checkpoint2">Compare with <small>optional · a second checkpoint, run on the same files with the same settings</small></label>
+          <div class="row">
+            <input id="checkpoint2" placeholder="/path/to/other_model.nemo" spellcheck="false" autocomplete="off">
+            <button class="btn icon" data-clear="checkpoint2" title="Clear this field">✕</button>
+            <button class="btn" data-browse="checkpoint2">Browse</button>
+            <button class="btn" data-upload="checkpoint2">Upload</button>
+            <button class="btn" id="swap-btn" title="Swap the two checkpoints (A ⇄ B) and run again">⇄ Swap</button>
+            <select id="run-models" title="Which checkpoints Run, Run all and Run folder again use (A: Checkpoint, B: Compare with)">
+              <option value="both">run A + B</option><option value="A">run A only</option><option value="B">run B only</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
           <label>Test</label>
           <div class="seg" id="mode">
             <button class="btn" data-mode="file" title="One audio file, with its reference / prediction RTTM">Single audio</button>
@@ -134,8 +148,7 @@
           <span id="set-coverage" class="muted small"></span>
           <button id="set-run-all" class="btn small" title="Run the files not run yet in every set">Run all sets</button>
         </div>
-        <div id="set-chart" class="set-chart"></div>
-        <div id="set-table" class="scroll"></div>
+        <div id="set-sections"></div>
         <div id="set-tip" class="set-tip" hidden></div>
       </details>
       <div id="folder-table" class="scroll"></div>
@@ -146,10 +159,17 @@
     <section id="results" hidden>
       <div id="warnings"></div>
       <div id="metrics" class="metrics"></div>
+      <section id="compare" class="block" hidden>
+        <span class="block-label">Compare models</span>
+        <div id="compare-table" class="scroll"></div>
+        <p class="hint">Same file, reference and post-processing settings for both. Lower is better; Δ is B − A in percentage points
+          (green: B is better). Choose A or B at the top left of the timeline to inspect either one.</p>
+      </section>
 
       <section class="block viewer">
-        <span class="block-label">Timeline</span>
+        <span class="block-label">Timeline <span id="timeline-model" class="model-name"></span></span>
         <div class="toolbar">
+          <select id="view-model" title="Which model the timeline, errors and speakers show (A: Checkpoint, B: Compare with)" hidden></select>
           <button id="restart-btn" class="btn icon" title="Play from the start (Home)">⏮</button>
           <button id="play-btn" class="btn icon" title="Play / pause (space)">▶</button>
           <button id="loop-btn" class="btn">A–B</button>
@@ -190,7 +210,7 @@
           <div id="tooltip" hidden></div>
         </div>
         <p class="hint">
-          wheel: zoom · drag or shift+wheel: pan · ctrl+wheel: scroll up / down · click: seek (on an error mark: loop it and keep its speakers lit; click elsewhere or <kbd>Esc</kbd> to release) · click a speaker segment: play it · click a white overlap column: play just the overlap · shift+drag: zoom to region · alt+drag: loop a region · double-click: fit ·
+          wheel: zoom · drag or shift+wheel: pan · ctrl+wheel: scroll up / down · click: seek (on an error mark: loop it and keep its speakers lit; click elsewhere or <kbd>Esc</kbd> to release) · click a speaker segment: play it · click a white overlap column: loop just the overlap · shift+drag: zoom to region · alt+drag: loop a region · double-click: fit ·
           keys: <kbd>space</kbd> play <kbd>Home</kbd> from the start <kbd>l</kbd> A–B loop <kbd>←</kbd><kbd>→</kbd> seek 5 s (shift: pan) <kbd>m</kbd> mute <kbd>f</kbd> full screen <kbd>+</kbd><kbd>−</kbd> zoom <kbd>0</kbd> fit
           <kbd>n</kbd><kbd>p</kbd> next / previous error
         </p>

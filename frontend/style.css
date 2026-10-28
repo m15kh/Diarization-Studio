@@ -108,6 +108,7 @@ main { max-width: 1680px; margin: 0 auto; padding: 18px 24px 40px; display: flex
   position: relative; min-width: 0; padding: 40px 16px 16px;
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
 }
+.block-label .model-name { color: var(--text); font-weight: 600; }
 .block-label {
   position: absolute; top: 0; left: 0; display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px; font-size: 12px; color: var(--muted); background: var(--label-bg);
@@ -229,6 +230,8 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 .metric.fa { box-shadow: inset 0 3px 0 var(--fa); }
 .metric.conf { box-shadow: inset 0 3px 0 var(--conf); }
 .metric.warn .m-value { color: var(--miss); }
+.metric.better .m-value { color: var(--ok); }
+.metric.worse .m-value { color: var(--miss); }
 
 /* timeline */
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
@@ -272,6 +275,10 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 .table td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .table th.num { text-align: right; }
 .table th.sortable { cursor: pointer; user-select: none; }
+.table th .th-sub { display: block; font-size: 10px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+.th-sub .tag { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 4px; font-size: 9.5px; line-height: 15px; }
+.th-sub .tag.better { color: var(--ok); background: var(--ok-bg); border: 1px solid var(--ok-border); }
+.th-sub .tag.worse { color: var(--miss); border: 1px solid currentColor; }
 .table th.sortable:hover, .table th.on { color: var(--text); }
 .table td.num { text-align: right; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .table .btn.icon { width: 26px; height: 24px; font-size: 10px; }
@@ -289,6 +296,9 @@ kbd { padding: 0 4px; border: 1px solid var(--border); border-radius: 4px; backg
 #folder-table td.grade { border-left: 3px solid var(--grade); }
 #folder-table td.der { font-weight: 700; color: var(--grade); }
 #folder-table .good { --grade: var(--ok); }
+.table td.better { color: var(--ok); }
+.table td.worse { color: var(--miss); }
+.table td.best { color: var(--ok); font-weight: 600; }
 #folder-table .fair { --grade: var(--fa); }
 #folder-table .poor { --grade: var(--miss); }
 #errors tr[data-i] { cursor: pointer; }
@@ -320,6 +330,10 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.4); }
 #br-list .meta { margin-left: auto; flex: none; font-size: 12px; color: var(--muted); }
 #br-list li.empty { cursor: default; color: var(--muted); }
 #br-list li.empty::before { display: none; }
-#set-table tr[data-set] { cursor: pointer; }
-#set-table tr.active td { background: var(--accent-soft); }
-#set-table tr.total td { border-top: 2px solid var(--border); font-weight: 600; }
+.set-table tr[data-set] { cursor: pointer; }
+.set-table tr.active td { background: var(--accent-soft); }
+.set-table tr.total td { border-top: 2px solid var(--border); font-weight: 600; }
+.set-model { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.set-model:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.set-model > h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.set-model > h4 .muted { font-weight: 400; }

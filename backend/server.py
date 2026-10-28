@@ -35,21 +35,24 @@ from pydantic import BaseModel
 import scoring
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+# files the app writes for itself: data/uploads/ and data/decoded/
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # uploads/audio and uploads/rttm sit side by side, so an uploaded reference is found next to its audio (../rttm)
-UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
+UPLOAD_DIR = DATA_DIR / "uploads"
 # saved errors: <id>.json (what, where, which model and settings) + <id>.wav (the audio around it) + saved.csv (all of them)
 SAVED_DIR = Path(__file__).resolve().parent.parent / "saved"
 # audio libsndfile cannot read (m4a, webm, ...) is decoded once with ffmpeg into a WAV here, for the model and the clips
-DECODED_DIR = Path(__file__).resolve().parent.parent / "decoded"
-UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints"}
+DECODED_DIR = DATA_DIR / "decoded"
+UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints", "checkpoint2": "checkpoints"}
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
 AUDIO_SUBDIRS = ("wav", "wavs", "audio")  # audio folders of a dataset (test/spk2/wav/): not part of a file's group
 EXTENSIONS = {"checkpoint": {".nemo", ".ckpt"}, "audio": AUDIO_EXTS, "rttm": {".rttm"}}
 PP_KEYS = {"onset", "offset", "pad_onset", "pad_offset", "min_duration_on", "min_duration_off"}
 CACHE_SIZE = 256  # model outputs kept in memory, so changing thresholds never re-runs the model
+MODEL_SLOTS = 2   # checkpoints kept loaded at once, so two models can be compared without reloading
 
 app = FastAPI(title="Diarization Inspector")
-state = {"device": "auto", "model": None}
+state = {"device": "auto", "model": None, "models": OrderedDict()}  # model: the one loaded last; models: by path
 startup = {"launch": uuid.uuid4().hex[:8], "paths": {}}  # paths given on the command line, filled into the UI
 lock = threading.Lock()  # one model, one inference at a time
 cache: OrderedDict = OrderedDict()
@@ -393,7 +396,7 @@ def write_saved_csv() -> None:
 
 @app.post("/api/upload")
 def upload(file: UploadFile = File(...), field: str = Form(""), sample_rate: int = Form(0)):
-    """Store an uploaded file in uploads/<kind>/ on the server and return its path.
+    """Store an uploaded file in data/uploads/<kind>/ on the server and return its path.
 
     A file with the same name is replaced (results are cached by modification time, so this is safe).
     Uploaded audio that is not WAV (mp3, m4a, ...) is converted to WAV and only the WAV is kept;
@@ -412,7 +415,7 @@ def upload(file: UploadFile = File(...), field: str = Form(""), sample_rate: int
 
 @app.post("/api/upload-folder")
 def upload_folder(file: UploadFile = File(...), relpath: str = Form(...), batch: str = Form(...)):
-    """Store one file of an uploaded folder at uploads/folders/<batch>/<relpath> and return the folder's path.
+    """Store one file of an uploaded folder at data/uploads/folders/<batch>/<relpath> and return the folder's path.
 
     `relpath` is the file's path inside the chosen folder, starting with that folder's name
     (data/rttm/a.rttm); `batch` keeps uploads of folders with the same name apart. Audio is kept as it is.
@@ -487,14 +490,20 @@ def get_model(path: str):
     """Return the loaded model, (re)loading it if the path or the file changed. Call with `lock` held."""
     from model import Diarizer
 
-    current = state["model"]
-    if current is None or current.path != path or current.mtime != os.path.getmtime(path):
+    models = state["models"]
+    current = models.get(path)
+    if current is None or current.mtime != os.path.getmtime(path):
         if not path.endswith((".nemo", ".ckpt")):
             raise ValueError(f"Checkpoint must be a .nemo or .ckpt file: {path}")
-        state["model"] = current = None  # free the old model before loading the new one
+        models.pop(path, None)
+        while len(models) >= MODEL_SLOTS:  # free the least recently used model before loading another
+            models.popitem(last=False)
+        state["model"] = current = None
         gc.collect()
-        state["model"] = Diarizer(path, state["device"])
-    return state["model"]
+        models[path] = current = Diarizer(path, state["device"])
+    models.move_to_end(path)
+    state["model"] = current
+    return current
 
 
 def infer(model, audio: str) -> dict:
@@ -572,7 +581,7 @@ def rttm_named(folder: Path, stem: str) -> str:
 
 
 def decoded(audio: str) -> str:
-    """`audio` itself when libsndfile reads it, else a WAV decoded from it once with ffmpeg (kept in decoded/)."""
+    """`audio` itself when libsndfile reads it, else a WAV decoded from it once with ffmpeg (kept in data/decoded/)."""
     import soundfile
 
     try:

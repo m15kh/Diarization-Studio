@@ -184,4 +184,4 @@ docs/images/         the screenshots in this README
 ## Notes
 
 - Inference is offline (whole file in one pass). That is fine for minutes of audio; hours may run out of GPU memory.
-- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except saved errors (`saved/`) and uploads, which go to `uploads/` in the project: `audio/`, `rttm/` (reference), `pred_rttm/` (prediction) and `checkpoints/`. Re-uploading a file with the same name replaces it.
+- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except saved errors (`saved/`) uploads and decoded audio, which go to `data/` in the project. Uploads are in `data/uploads/`: `audio/`, `rttm/` (reference), `pred_rttm/` (prediction), `checkpoints/` and `folders/` (uploaded folders). Audio the model cannot read directly (m4a, webm, ...) is converted to WAV once and kept in `data/decoded/`. Re-uploading a file with the same name replaces it.

@@ -1,6 +1,5 @@
 /__pycache__
 *.wav
-/uploads
+/data
 __pycache__
 /saved
-/decoded
