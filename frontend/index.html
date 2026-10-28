@@ -48,6 +48,7 @@
             <button class="btn icon" data-clear="audio" title="Clear this field">✕</button>
             <button class="btn" data-browse="audio">Browse</button>
             <button class="btn file-only" data-upload="audio">Upload</button>
+            <button class="btn folder-only" data-upload-folder="audio" title="Upload a folder from this computer (its sub-folders and any RTTMs in it too)">Upload</button>
             <select id="upload-rate" class="file-only" title="Sample rate of the WAV an uploaded file is converted to (mp3, m4a, ... are always converted to WAV)">
               <option value="0">original rate</option><option value="8000">8 kHz</option><option value="16000">16 kHz</option>
               <option value="22050">22.05 kHz</option><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option>
@@ -64,6 +65,7 @@
             <button class="btn icon" data-clear="ref" title="Clear this field">✕</button>
             <button class="btn" data-browse="ref">Browse</button>
             <button class="btn file-only" data-upload="ref">Upload</button>
+            <button class="btn folder-only" data-upload-folder="ref" title="Upload a folder of RTTMs from this computer">Upload</button>
           </div>
         </div>
 
@@ -74,6 +76,7 @@
             <button class="btn icon" data-clear="hyp" title="Clear this field">✕</button>
             <button class="btn" data-browse="hyp">Browse</button>
             <button class="btn file-only" data-upload="hyp">Upload</button>
+            <button class="btn folder-only" data-upload-folder="hyp" title="Upload a folder of RTTMs from this computer">Upload</button>
           </div>
         </div>
 
@@ -239,6 +242,7 @@
     <ul id="br-list"></ul>
   </dialog>
   <input type="file" id="file-input" hidden>
+  <input type="file" id="folder-input" webkitdirectory multiple hidden>
   <audio id="player" preload="auto"></audio>
 </body>
 </html>

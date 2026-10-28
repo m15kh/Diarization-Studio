@@ -47,7 +47,7 @@ const MODES = {
     placeholders: { audio: '/path/to/audio.wav', ref: 'found automatically next to the audio, or ../rttm/', hyp: 'leave empty to run the checkpoint' },
   },
   folder: {
-    audio: 'Audio folder', 'audio-hint': 'sub-folders included: a whole test set (test/ with spk2/wav/, spk3/wav/, ...) works · opened one file at a time',
+    audio: 'Audio folder', 'audio-hint': 'sub-folders included: a whole test set (test/ with spk2/wav/, spk3/wav/, ...) works · server path, browse, or upload a folder · opened one file at a time',
     ref: 'Reference RTTM folder', 'ref-hint': 'optional · <name>.rttm for each <name>.wav, sub-folders included · found in rttm/ next to wav/',
     hyp: 'Prediction RTTM folder', 'hyp-hint': 'optional · existing outputs to inspect instead of running the model',
     placeholders: { audio: '/path/to/test or /path/to/test/spk2', ref: 'found automatically in ../rttm/', hyp: 'leave empty to run the checkpoint' },
@@ -1261,6 +1261,38 @@ async function uploadFile(field, file) {
   }
 }
 
+// Upload a folder chosen on this computer (sub-folders included) to uploads/folders/ on the server, file by file,
+// and put its server path in the field. Only what the field uses is sent: audio and RTTMs for the audio folder
+// (an RTTM in it also becomes the reference folder), RTTMs for the others.
+async function uploadFolder(field, fileList) {
+  const exts = field === 'audio' ? /\.(wav|flac|mp3|ogg|opus|m4a|webm|rttm)$/i : /\.rttm$/i;
+  const files = [...fileList].filter((f) => exts.test(f.name) && !f.webkitRelativePath.split('/').some((p) => p.startsWith('.')));
+  const name = fileList[0]?.webkitRelativePath.split('/')[0] || 'folder';
+  if (!files.length) return showError(`No ${field === 'audio' ? 'audio or RTTM' : 'RTTM'} files in ${name}`);
+  const total = files.reduce((n, f) => n + f.size, 0);
+  const batchId = `${Date.now().toString(36)}`;
+  let sent = 0, root = '';
+  try {
+    for (const [k, file] of files.entries()) {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      form.append('relpath', file.webkitRelativePath);
+      form.append('batch', batchId);
+      const label = `${name} · file ${k + 1} / ${files.length} (${Math.round((sent / total) * 100)}% done)`;
+      root = (await postWithProgress('/api/upload-folder', form, field, label, 120000 + file.size / 500)).path;
+      sent += file.size;
+    }
+    setVal(field, root);
+    if (field === 'audio' && files.some((f) => /\.rttm$/i.test(f.name))) setVal('ref', root);
+    if (field === 'audio') await audioChanged();
+    save();
+    setStatus(`Uploaded ${name} (${files.length} files)`);
+  } catch (e) {
+    setStatus('');
+    showError(e);
+  }
+}
+
 // POST `form` with a thin progress line under the field's input row (fetch cannot report upload progress).
 // Once every byte is sent the line pulses until the server answers (saving, converting to WAV).
 function postWithProgress(url, form, field, name, timeoutMs) {
@@ -1326,6 +1358,17 @@ function bindInputs() {
   fileInput.addEventListener('change', () => {
     if (fileInput.files[0]) uploadFile(fileInput.dataset.field, fileInput.files[0]);
     fileInput.value = '';
+  });
+  const folderInput = $('#folder-input');
+  for (const btn of document.querySelectorAll('[data-upload-folder]')) {
+    btn.addEventListener('click', () => {
+      folderInput.dataset.field = btn.dataset.uploadFolder;
+      folderInput.click();
+    });
+  }
+  folderInput.addEventListener('change', () => {
+    if (folderInput.files.length) uploadFolder(folderInput.dataset.field, folderInput.files);
+    folderInput.value = '';
   });
 
   // drop files anywhere: routed by extension (an RTTM dropped on the prediction row goes there)

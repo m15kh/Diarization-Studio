@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 import zipfile
 from collections import OrderedDict
@@ -38,6 +39,8 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
 # saved errors: <id>.json (what, where, which model and settings) + <id>.wav (the audio around it) + saved.csv (all of them)
 SAVED_DIR = Path(__file__).resolve().parent.parent / "saved"
+# audio libsndfile cannot read (m4a, webm, ...) is decoded once with ffmpeg into a WAV here, for the model and the clips
+DECODED_DIR = Path(__file__).resolve().parent.parent / "decoded"
 UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints"}
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
 AUDIO_SUBDIRS = ("wav", "wavs", "audio")  # audio folders of a dataset (test/spk2/wav/): not part of a file's group
@@ -94,7 +97,7 @@ def startup_paths():
 def run(req: RunRequest):
     audio = existing(req.audio, "Audio")
     file_id = Path(audio).stem
-    info = audio_info(audio)
+    info = audio_info(decoded(audio))
     out = {"file_id": file_id, "audio": audio, "audio_info": info, "warnings": []}
 
     if req.hyp_rttm:
@@ -109,7 +112,7 @@ def run(req: RunRequest):
         checkpoint = existing(req.checkpoint, "Checkpoint")
         with lock:
             model = get_model(checkpoint)
-            result = infer(model, audio)
+            result = infer(model, decoded(audio))
         from model import postprocess
 
         probs = result["probs"]
@@ -181,7 +184,7 @@ def folder(audio: str, ref: str = "", hyp: str = ""):
             raise HTTPException(400, f"{what} folder not found: {path}")
         index: dict[str, str] = {}
         for f in find_files(d, {".rttm"}):
-            index.setdefault(f.stem, str(f))  # the same name twice: the first in sort order wins
+            index.setdefault(name_key(f.stem), str(f))  # the same name twice: the first in sort order wins
         return d, index
 
     ref_dir, refs = rttm_index(ref, "Reference RTTM")
@@ -198,8 +201,8 @@ def folder(audio: str, ref: str = "", hyp: str = ""):
         "ref_dir": str(ref_dir or ""),
         "hyp_dir": str(hyp_dir or ""),
         "files": [{"audio": str(f), "name": str(f.relative_to(audio_dir)), "group": group(f),
-                   "ref": refs.get(f.stem, "") if ref_dir else pair(str(f))["ref"],
-                   "hyp": hyps.get(f.stem, "")} for f in files],
+                   "ref": refs.get(name_key(f.stem), "") if ref_dir else pair(str(f))["ref"],
+                   "hyp": hyps.get(name_key(f.stem), "")} for f in files],
     }
 
 
@@ -258,7 +261,7 @@ def pair(audio: str, prev_audio: str = "", ref: str = "", hyp: str = ""):
             return current
         else:
             dirs = ([Path(current).expanduser().parent] if current else []) + fallback_dirs
-        return next((str(d / f"{stem}.rttm") for d in dirs if (d / f"{stem}.rttm").is_file()), "")
+        return next((found for d in dirs if (found := rttm_named(d, stem))), "")
 
     return {
         "ref": follow(ref, [audio_dir, audio_dir.parent / "rttm", audio_dir / "rttm"]),
@@ -307,9 +310,9 @@ def save_error(req: SaveRequest):
 
     audio = existing(req.audio, "Audio")
     file_id = Path(audio).stem
-    info = soundfile.info(audio)
+    info = soundfile.info(decoded(audio))
     clip_start, clip_end = max(0.0, req.start - req.pad), min(info.duration, req.end + req.pad)
-    data, sr = soundfile.read(audio, start=int(clip_start * info.samplerate), stop=int(clip_end * info.samplerate))
+    data, sr = soundfile.read(decoded(audio), start=int(clip_start * info.samplerate), stop=int(clip_end * info.samplerate))
     types = [t for t in ("miss", "fa", "conf") if getattr(req, t) > 0]
     item_id = f"{file_id}_{req.start:.2f}s_{'-'.join(types) or 'error'}_{uuid.uuid4().hex[:4]}"
     SAVED_DIR.mkdir(parents=True, exist_ok=True)
@@ -405,6 +408,24 @@ def upload(file: UploadFile = File(...), field: str = Form(""), sample_rate: int
         if not is_wav or (sample_rate > 0 and audio_info(str(dest)).get("sample_rate") != sample_rate):
             dest = to_wav(dest, sample_rate)
     return {"path": str(dest)}
+
+
+@app.post("/api/upload-folder")
+def upload_folder(file: UploadFile = File(...), relpath: str = Form(...), batch: str = Form(...)):
+    """Store one file of an uploaded folder at uploads/folders/<batch>/<relpath> and return the folder's path.
+
+    `relpath` is the file's path inside the chosen folder, starting with that folder's name
+    (data/rttm/a.rttm); `batch` keeps uploads of folders with the same name apart. Audio is kept as it is.
+    """
+    parts = [p for p in Path(relpath.replace("\\", "/")).parts if p not in ("", ".", "..", "/")]
+    if len(parts) < 2:
+        raise HTTPException(400, f"Bad file path in the upload: {relpath}")
+    root = UPLOAD_DIR / "folders" / Path(batch).name / parts[0]
+    dest = root.joinpath(*parts[1:])
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("wb") as fh:
+        shutil.copyfileobj(file.file, fh)
+    return {"path": str(root)}
 
 
 def to_wav(src: Path, sample_rate: int = 0) -> Path:
@@ -532,8 +553,52 @@ def audio_info(path: str) -> dict:
         return {}
 
 
+def name_key(name: str) -> str:
+    """A file name as matched against RTTM names: spaces and underscores alike, case and Unicode form ignored,
+    Arabic and Persian yeh / kaf alike ("۲۰ تیر دیلی" finds ۲۰_تیر_دیلی.rttm)."""
+    name = unicodedata.normalize("NFKC", name).casefold().replace("ي", "ی").replace("ك", "ک")
+    return "_".join(name.replace("_", " ").split())
+
+
+def rttm_named(folder: Path, stem: str) -> str:
+    """The RTTM in `folder` named like an audio file (exactly, else by `name_key`), or ""."""
+    exact = folder / f"{stem}.rttm"
+    if exact.is_file():
+        return str(exact)
+    if not folder.is_dir():
+        return ""
+    key = name_key(stem)
+    return next((str(f) for f in sorted(folder.glob("*.rttm")) if name_key(f.stem) == key), "")
+
+
+def decoded(audio: str) -> str:
+    """`audio` itself when libsndfile reads it, else a WAV decoded from it once with ffmpeg (kept in decoded/)."""
+    import soundfile
+
+    try:
+        soundfile.info(audio)
+        return audio
+    except Exception:
+        pass
+    st = os.stat(audio)
+    tag = uuid.uuid5(uuid.NAMESPACE_URL, f"{audio}|{st.st_mtime_ns}|{st.st_size}").hex[:12]
+    wav = DECODED_DIR / f"{Path(audio).stem}_{tag}.wav"
+    if not wav.is_file():
+        if shutil.which("ffmpeg") is None:
+            raise ValueError(f"Cannot read {Path(audio).name}: it needs ffmpeg, which is not installed on the server.")
+        DECODED_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = wav.with_name(f".{uuid.uuid4().hex}.wav")
+        proc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", audio, "-vn", "-c:a", "pcm_s16le", str(tmp)],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            raise ValueError(f"Could not decode {Path(audio).name}: {proc.stderr.strip() or 'ffmpeg failed'}")
+        tmp.replace(wav)
+    return str(wav)
+
+
 def check_recording_id(out: dict, what: str, rec_id: str, file_id: str) -> None:
-    if rec_id != file_id:
+    if name_key(rec_id) != name_key(file_id):
         out["warnings"].append(f"{what} is for recording '{rec_id}' but the audio file is '{file_id}'.")
 
 

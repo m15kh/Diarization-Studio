@@ -139,7 +139,7 @@ select {
 .seg .btn:first-child { border-radius: 8px 0 0 8px; }
 .seg .btn:last-child { border-radius: 0 8px 8px 0; margin-left: -1px; }
 .seg .btn.on { position: relative; }
-body[data-mode="folder"] .file-only { display: none; }
+body[data-mode="folder"] .file-only, body:not([data-mode="folder"]) .folder-only { display: none; }
 .saved-badge { margin-left: 8px; background: none; cursor: pointer; font: 12px var(--font); }
 .saved-search { max-width: 360px; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; }
