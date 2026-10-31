@@ -1,6 +1,7 @@
 # Diarization Inspector
 
-A small web UI to run a NeMo Sortformer diarization checkpoint on an audio file, or a whole test set, and see exactly where it is wrong.
+A small web UI to run a NeMo Sortformer diarization checkpoint on an audio file, or a whole test set, and see exactly where it is wrong,
+and to correct the reference labels by hand where they are wrong themselves ([Label](#label)).
 FastAPI backend (Python) + plain HTML/JS frontend. No database, no build step.
 
 ![The inspector with a whole test set open: inputs, post-processing, the folder totals and the per-set error breakdown](docs/images/overview.png)
@@ -161,6 +162,53 @@ loops that error (0.3 s on each side). The loop shows as a shaded band with A / 
 Mouse: click on an error mark (missed / false alarm / confusion lane) = play just that part, wheel = zoom, drag or shift+wheel = pan, ctrl+wheel = scroll the page up / down (to reach the lanes below when there are many speakers), click = seek, shift+drag = zoom to a region, double-click = fit.
 Keys: `[` `]` previous / next file, `space` play, `Home` play from the start, `l` A–B loop, `←` `→` seek 5 s (`shift` + `←` `→` pan), `m` mute, `f` full screen (metrics, timeline, error list and speakers table; `Esc` leaves), `+` `−` zoom, `0` fit, `n` / `p` next / previous error.
 
+## Label
+
+The **Label** tab (next to **Inspect** at the top) corrects RTTM labels by hand: open an audio file with its RTTM, fix the
+segments that are wrong and save.
+
+1. **Audio**: a server path, Browse, Upload, or drop a file. ◀ ▶ (or `[` `]`) step through its folder.
+2. **Labels RTTM** (optional): found automatically next to the audio or in `../rttm/`, like the reference in the Inspect tab.
+   Empty: label from scratch. **Start from model prediction** starts from what the Inspect tab's checkpoint predicts (with its
+   post-processing settings) instead.
+3. **Save** (`ctrl+s`) writes the RTTM under **Save as**. With a **Save to folder**, e.g. `rttm_corrected`, that is
+   `rttm_corrected/<name>.rttm` (named like the original RTTM), and the original RTTMs stay as they are. A folder given by
+   name goes beside `wav/` and `rttm/` (or into the audio's folder when that is not a `wav/` folder); a full path works too.
+   A file opens with the labels saved in that folder before, when there are some, else with its original RTTM, so a test
+   set can be corrected file by file with ◀ ▶. Without a folder, Save replaces the RTTM opened (or writes `<name>.rttm`
+   where it is looked up: `rttm/` next to a `wav/` folder, else next to the audio). The first time an RTTM is replaced, a
+   copy of the original goes to `data/label_backups/`. Lines of other recordings in the same RTTM are kept. **Download
+   RTTM** gives the labels as they are, saved or not.
+4. **Unsaved changes are never lost**: after every change they are kept in the browser (● unsaved changes · draft kept).
+   If the page is closed or crashes, opening the file again brings them back; ↶ Undo then returns to the RTTM on disk.
+   Saving, or discarding them when asked, forgets them.
+
+One lane per speaker under the waveform:
+
+- **drag a segment** to move it. Up or down onto another lane gives it to that speaker (its times stay unless you also drag
+  sideways); onto **+ new speaker** to a new one;
+- **drag its edges** to change where it starts or ends. Edges snap to the other segments' edges and to the playback cursor
+  (hold `ctrl`, or untick **snap**, to place them freely);
+- **drag on an empty part of a lane** to add a segment;
+- **click a segment** to select it: the playback cursor goes to its start, and `space` / ▶ then play just that segment
+  (click the selected segment again to put the cursor where you click, e.g. to split it there). Selecting a segment during
+  playback plays it. The bar above the lanes shows its speaker, start and end (type exact times there) and play / split /
+  join / delete;
+- a segment that ends up overlapping another segment of its speaker merges with it;
+- **Speakers** table: rename (spaces become `_`, since RTTM fields are separated by spaces), **merge into** another speaker
+  (one person labeled as two), delete.
+
+Keys: `space` play / pause (with a segment selected: just that segment), `Enter` play the selected segment from its start,
+`1`–`9` give it to that speaker, `s` split it at the playback cursor,
+`j` join it with the next segment of its speaker, `i` / `o` set its start / end to the playback cursor, `Delete` delete it,
+`n` / `p` next / previous segment, `ctrl+z` / `ctrl+shift+z` undo / redo, `ctrl+s` save, `Esc` deselect (or cancel a drag),
+and `←` `→` `+` `−` `0` `[` `]` as in the Inspect tab. Unsaved changes show as ● on the tab; leaving the page or opening
+another file asks first (and a draft is kept all the same, see above).
+
+**✎ Edit labels** in the Inspect tab's timeline opens the file shown, with its reference RTTM, in the Label tab at the same
+place: an error of the model that turns out to be a labeling mistake is fixed right there. **Inspect with these labels** goes
+the other way: the file in the Inspect tab, scored against the saved labels.
+
 ## Scoring
 
 - 10 ms frames, optimal one-to-one speaker mapping (Hungarian), DER = (missed + false alarm + confusion) / reference speech.
@@ -177,11 +225,11 @@ Keys: `[` `]` previous / next file, `space` play, `Home` play from the start, `l
 backend/server.py    FastAPI app: the API, and serves the frontend
 backend/model.py     NeMo wrapper: load .nemo / .ckpt, inference, post-processing
 backend/scoring.py   RTTM read/write, DER, speaker mapping, error regions
-frontend/            index.html, app.js (UI), timeline.js (canvas timeline), style.css
+frontend/            index.html, app.js (UI), timeline.js (canvas timeline), labeler.js (the Label tab's editor), style.css
 docs/images/         the screenshots in this README
 ```
 
 ## Notes
 
 - Inference is offline (whole file in one pass). That is fine for minutes of audio; hours may run out of GPU memory.
-- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except saved errors (`saved/`) uploads and decoded audio, which go to `data/` in the project. Uploads are in `data/uploads/`: `audio/`, `rttm/` (reference), `pred_rttm/` (prediction), `checkpoints/` and `folders/` (uploaded folders). Audio the model cannot read directly (m4a, webm, ...) is converted to WAV once and kept in `data/decoded/`. Re-uploading a file with the same name replaces it.
+- The last 256 model outputs are cached in memory (only the speaker probabilities: about 70 KB per 3 minutes of audio with 8 speakers). Nothing is written to disk except saved errors (`saved/`), the RTTMs the Label tab saves (with a copy of each original it replaces in `data/label_backups/`), uploads and decoded audio, which go to `data/` in the project. The Label tab's unsaved changes are kept in the browser (local storage, the last 20 files). Uploads are in `data/uploads/`: `audio/`, `rttm/` (reference), `pred_rttm/` (prediction), `checkpoints/` and `folders/` (uploaded folders). Audio the model cannot read directly (m4a, webm, ...) is converted to WAV once and kept in `data/decoded/`. Re-uploading a file with the same name replaces it.

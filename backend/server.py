@@ -43,6 +43,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 SAVED_DIR = Path(__file__).resolve().parent.parent / "saved"
 # audio libsndfile cannot read (m4a, webm, ...) is decoded once with ffmpeg into a WAV here, for the model and the clips
 DECODED_DIR = DATA_DIR / "decoded"
+# the Label tab keeps the original of every RTTM it overwrites here (the first time only)
+LABEL_BACKUP_DIR = DATA_DIR / "label_backups"
 UPLOAD_FOLDERS = {"audio": "audio", "ref": "rttm", "hyp": "pred_rttm", "checkpoint": "checkpoints", "checkpoint2": "checkpoints"}
 AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a", ".webm"}
 AUDIO_SUBDIRS = ("wav", "wavs", "audio")  # audio folders of a dataset (test/spk2/wav/): not part of a file's group
@@ -254,13 +256,13 @@ def pair(audio: str, prev_audio: str = "", ref: str = "", hyp: str = ""):
     anything else the user picked by hand is kept.
     """
     stem = Path(audio).stem
-    prev_stem = Path(prev_audio).stem if prev_audio else None
+    prev_key = name_key(Path(prev_audio).stem) if prev_audio else None  # "a b.wav" goes with a_b.rttm too
     audio_dir = Path(audio).expanduser().parent
 
     def follow(current: str, fallback_dirs: list[Path]) -> str:
         if current and Path(current).expanduser().is_dir():  # an RTTM folder: the file named like the audio
             dirs = [Path(current).expanduser()] + fallback_dirs
-        elif current and Path(current).stem != prev_stem:
+        elif current and name_key(Path(current).stem) != prev_key:
             return current
         else:
             dirs = ([Path(current).expanduser().parent] if current else []) + fallback_dirs
@@ -392,6 +394,105 @@ def write_saved_csv() -> None:
         w.writeheader()
         for item in rows:
             w.writerow({**item, **{k: " ".join(item.get(k, [])) for k in ("types", "ref_speakers", "hyp_speakers")}})
+
+
+class LabelSaveRequest(BaseModel):
+    path: str
+    rec_id: str  # recording id written in the RTTM lines
+    names: list[str]
+    segments: list[list[float]]  # [[start, end, speaker index], ...]
+
+
+@app.get("/api/label")
+def label_open(audio: str, rttm: str = "", folder: str = ""):
+    """An audio file and the labels to correct in the Label tab: the speakers and segments of `rttm` (none: no labels
+    yet), and where Save writes them (see label_path). When the save `folder` holds labels saved for this file before,
+    those open instead, to go on from them (`original` is then the `rttm` asked for)."""
+    audio = existing(audio, "Audio")
+    file_id = Path(audio).stem
+    info = audio_info(decoded(audio))
+    out = {"audio": audio, "file_id": file_id, "rec_id": "_".join(file_id.split()), "audio_info": info,
+           "duration": round(info.get("duration") or 0.0, 3), "rttm": "", "original": "", "names": [], "segments": [],
+           "warnings": []}
+    saved = label_path(audio, rttm, folder) if folder.strip() else ""
+    if saved and os.path.isfile(saved) and os.path.abspath(os.path.expanduser(rttm.strip())) != saved:
+        out["original"], rttm = rttm, saved
+    if rttm:
+        path = existing(rttm, "RTTM")
+        names, segments, rec_id = scoring.read_rttm(path, file_id, allow_empty=True)
+        check_recording_id(out, "The RTTM", rec_id, file_id)
+        out.update(rttm=path, names=names, segments=segments, rec_id="_".join(rec_id.split()) or out["rec_id"])
+        self_overlaps = scoring.count_self_overlaps(segments)
+        if self_overlaps:
+            out["warnings"].append(
+                f"{self_overlaps} segment(s) overlap another segment of the same speaker (darker where they overlap). "
+                "Moving or resizing one of them merges the two.")
+        late = max((seg[1] for seg in segments), default=0)
+        if out["duration"] and late > out["duration"] + 0.5:
+            out["warnings"].append(f"The labels go to {late:.2f} s but the audio is only {out['duration']:.2f} s long.")
+    out["save_path"] = label_path(audio, out["rttm"], folder)
+    if not out["rttm"] and os.path.isfile(out["save_path"]):
+        out["warnings"].append(f"{out['save_path']} exists: Save replaces its labels for this recording "
+                               f"(a copy of the original is kept in {LABEL_BACKUP_DIR}).")
+    return out
+
+
+@app.post("/api/label")
+def label_save(req: LabelSaveRequest):
+    """Write labels from the Label tab as an RTTM. Lines of other recordings in that file are kept; the first time an
+    existing file is replaced, a copy of it goes to data/label_backups/."""
+    path = Path(req.path.strip()).expanduser().absolute()
+    if path.suffix.lower() != ".rttm":
+        raise HTTPException(400, f"Labels are saved as an .rttm file: {req.path}")
+    # RTTM fields are separated by whitespace
+    rec_id, names = "_".join(req.rec_id.split()), ["_".join(name.split()) for name in req.names]
+    if not rec_id or not all(names) or len(set(names)) < len(names):
+        raise HTTPException(400, "Every speaker needs a name of its own")
+    segments = []
+    for seg in req.segments:
+        if len(seg) != 3 or not 0 <= seg[0] < seg[1] or not 0 <= int(seg[2]) < len(names):
+            raise HTTPException(400, f"Not a segment: {seg}")
+        segments.append([round(seg[0], 3), round(seg[1], 3), int(seg[2])])
+    keep, backup = [], ""
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if parts and not (parts[0] == "SPEAKER" and len(parts) > 1 and parts[1] == rec_id):
+                keep.append(f"{line}\n")
+        original = LABEL_BACKUP_DIR / f"{path.stem}_{uuid.uuid5(uuid.NAMESPACE_URL, str(path)).hex[:8]}.rttm"
+        if not original.is_file():
+            LABEL_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, original)
+            backup = str(original)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{uuid.uuid4().hex}.rttm")  # write next to it, then rename: never a half-written RTTM
+    tmp.write_text("".join(keep) + scoring.write_rttm(rec_id, names, segments), encoding="utf-8")
+    tmp.replace(path)
+    return {"path": str(path), "backup": backup, "segments": len(segments), "kept": len(keep)}
+
+
+@app.get("/api/label-target")
+def label_target(audio: str, rttm: str = "", folder: str = ""):
+    """Where Save writes the labels of `audio` (see label_path), and whether that file exists already."""
+    path = label_path(os.path.abspath(os.path.expanduser(audio.strip())), rttm, folder)
+    return {"path": path, "exists": os.path.isfile(path)}
+
+
+def label_path(audio: str, rttm: str = "", folder: str = "") -> str:
+    """Where Save writes the labels of `audio` (an absolute path).
+
+    With a `folder`: <folder>/<name>.rttm, named like the RTTM opened (else like the audio). A folder given by name
+    goes beside wav/ and rttm/ (when the audio is in a wav/, wavs/ or audio/ folder; else into the audio's folder).
+    Without: the RTTM opened, else <name>.rttm where /api/pair looks for it (rttm/ beside wav/, else next to the audio).
+    """
+    a = Path(audio).expanduser()
+    in_wav = a.parent.name.lower() in AUDIO_SUBDIRS
+    if folder.strip():
+        out = Path(folder.strip()).expanduser()
+        if not out.is_absolute():
+            out = (a.parent.parent if in_wav else a.parent) / out
+        return str(out / (Path(rttm).name if rttm.strip() else f"{a.stem}.rttm"))
+    return rttm or str((a.parent.parent / "rttm" if in_wav else a.parent) / f"{a.stem}.rttm")
 
 
 @app.post("/api/upload")

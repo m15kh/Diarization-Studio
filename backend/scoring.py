@@ -29,11 +29,12 @@ def natural_key(text: str) -> list:
     return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", text)]
 
 
-def read_rttm(path: str, file_id: str | None = None) -> tuple[list[str], list[list], str]:
+def read_rttm(path: str, file_id: str | None = None, allow_empty: bool = False) -> tuple[list[str], list[list], str]:
     """Parse an RTTM file.
 
     Returns (speaker names, segments as [start, end, speaker index], recording id).
     If the file holds several recordings, only the one named `file_id` is kept.
+    A file without SPEAKER lines is an error, unless `allow_empty` (then: no speakers, recording id `file_id`).
     """
     rows = []
     for line in Path(path).read_text().splitlines():
@@ -41,6 +42,8 @@ def read_rttm(path: str, file_id: str | None = None) -> tuple[list[str], list[li
         if len(parts) >= 8 and parts[0] == "SPEAKER":
             rows.append((parts[1], float(parts[3]), float(parts[4]), parts[7]))
     if not rows:
+        if allow_empty:
+            return [], [], file_id or ""
         raise ValueError(f"No SPEAKER lines found in {path}")
 
     rec_ids = sorted({row[0] for row in rows})

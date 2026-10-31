@@ -1,10 +1,12 @@
 import { Timeline, PALETTE, fmtTime } from './timeline.js';
+import { LabelEditor } from './labeler.js';
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const pct = (x, digits = 2) => (x == null ? '–' : `${(x * 100).toFixed(digits)}%`);
 const secs = (x) => `${x.toFixed(2)} s`;
 const basename = (p) => p.split(/[\\/]/).pop();
+const tail = (p) => p.split(/[\\/]/).slice(-2).join('/');  // the file with its folder: rttm_corrected/a.rttm
 // A checkpoint's file name without the extension, cut to fit a column header
 const shortName = (p, max = 20) => { const n = basename(p).replace(/\.(nemo|ckpt)$/i, ''); return n.length > max ? `${n.slice(0, max - 1)}…` : n; };
 const dot = (color) => `<span class="dot" style="background:${color}"></span>`;
@@ -39,6 +41,11 @@ const FIELDS = {
   audio: { kind: 'audio', title: 'an audio file' },
   ref: { kind: 'rttm', title: 'the reference RTTM' },
   hyp: { kind: 'rttm', title: 'a prediction RTTM' },
+};
+// the Label tab's inputs (kept apart from FIELDS: they do not run the inspector)
+const LABEL_FIELDS = {
+  'lab-audio': { kind: 'audio', title: 'the audio file to label' },
+  'lab-rttm': { kind: 'rttm', title: 'the RTTM with the labels to correct' },
 };
 
 // What the input fields say in each mode ('file': one audio file, 'folder': a folder of them)
@@ -96,7 +103,18 @@ let picker = null;
 let savedItems = [];    // saved errors (see /api/saved), newest first
 const clipPlayer = new Audio();
 let rescoreTimer = null;
-let statusTimer = null;
+const statusTimers = {};  // spinner of each status line, by element id
+
+// Label tab (see "labeling" below)
+const labPlayer = $('#lab-player');
+const editor = new LabelEditor({
+  canvas: $('#lab-canvas'), overview: $('#lab-overview'), tooltip: $('#lab-tooltip'), player: labPlayer, onChange: labelChanged,
+});
+let lab = null;         // file open in the editor: { audio, file_id, rec_id, rttm, duration, saved (its RTTM text on disk) }
+let labAudio = '';      // audio path in the Label tab's player
+let labLastAudio = '';  // audio path the Labels RTTM field was last paired with
+let labPairing = Promise.resolve();  // that lookup, see labPair
+let labSeq = 0;
 
 renderSettings();
 renderYamlHistory();
@@ -105,6 +123,7 @@ bindInputs();
 bindResults();
 bindKeys();
 bindSaved();
+bindLabel();
 initServer();
 loadSaved();
 
@@ -121,6 +140,12 @@ async function api(url, body, method) {
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({ detail: `${res.status} ${res.statusText}` }));
   if (!res.ok) {
+    // FastAPI's own answers when there is no such route (the app's errors always say what is wrong): the server was
+    // started before the code was updated, and serves this new page from disk with its old API
+    if ((res.status === 404 && data.detail === 'Not Found') || (res.status === 405 && data.detail === 'Method Not Allowed')) {
+      throw new Error(`The server has no ${url.split('?')[0]}: it was started before the code was updated. `
+        + 'Restart it (python3 backend/server.py), then try again.');
+    }
     const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join('; ') : data.detail;
     throw Object.assign(new Error(detail || res.statusText), { trace: data.trace });
   }
@@ -135,6 +160,7 @@ async function initServer() {
     const paths = startup.launch !== store.get('launch') ? startup.paths : {};
     store.set('launch', startup.launch);
     applyPaths(paths);
+    if (paths.audio) setTab('inspect');  // audio given in the terminal: show it in the inspector
     if (info) {
       if (!val('checkpoint')) setVal('checkpoint', info.path);
       showModel(info);
@@ -1263,22 +1289,29 @@ function jumpError(dir) {
 
 // ---- audio --------------------------------------------------------------------------------
 
-async function loadAudio(path) {
+function loadAudio(path) {
   loadedAudio = path;
   player.pause();
-  timeline.setWave(null, 0, 'loading audio…');
+  return loadAudioInto(player, timeline, path, () => loadedAudio === path);
+}
+
+// Fetch an audio file into the <audio> `el` and its waveform into the timeline `tl`, with the playback cursor at
+// `at` seconds; `current()` turns false when another file replaced this one meanwhile.
+async function loadAudioInto(el, tl, path, current, at = 0) {
+  tl.setWave(null, 0, 'loading audio…');
   try {
     const res = await fetch(`/api/audio?path=${encodeURIComponent(path)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const bytes = await res.arrayBuffer();
-    if (loadedAudio !== path) return;
-    if (player.src.startsWith('blob:')) URL.revokeObjectURL(player.src);
-    player.src = URL.createObjectURL(new Blob([bytes], { type: res.headers.get('content-type') || '' }));
+    if (!current()) return;
+    if (el.src.startsWith('blob:')) URL.revokeObjectURL(el.src);
+    el.src = URL.createObjectURL(new Blob([bytes], { type: res.headers.get('content-type') || '' }));
+    if (at) el.addEventListener('loadedmetadata', () => { el.currentTime = at; }, { once: true });
     // decode at 16 kHz, the rate the model sees
     const decoded = await new OfflineAudioContext(1, 1, 16000).decodeAudioData(bytes);
-    if (loadedAudio === path) timeline.setWave(mixDown(decoded), decoded.sampleRate);
+    if (current()) tl.setWave(mixDown(decoded), decoded.sampleRate);
   } catch (e) {
-    if (loadedAudio === path) timeline.setWave(null, 0, `waveform unavailable: ${e.message}`);
+    if (current()) tl.setWave(null, 0, `waveform unavailable: ${e.message}`);
   }
 }
 
@@ -1395,6 +1428,7 @@ async function browseFor(field) {
   const path = await pickFile(field);
   if (!path) return;
   setVal(field, path);
+  if (field in LABEL_FIELDS) return labelFieldSet(field);
   if (field === 'audio') await audioChanged();
   save();
 }
@@ -1410,8 +1444,10 @@ function withTimeout(promise, ms, message, onTimeout) {
 }
 
 async function uploadFile(field, file) {
-  if (!field.startsWith('checkpoint')) setMode('file');  // uploads are single files
-  setStatus(`Uploading ${file.name}…`, true);
+  const labeling = field in LABEL_FIELDS;
+  const status = labeling ? labStatus : setStatus;
+  if (['audio', 'ref', 'hyp'].includes(field)) setMode('file');  // uploads are single files
+  status(`Uploading ${file.name}…`, true);
   try {
     // read the file first, so a file the browser cannot read gives its own error instead of a stalled request
     const unreadable = `The browser could not read ${file.name}. If it is on the server, use Browse or type its path instead.`;
@@ -1419,17 +1455,18 @@ async function uploadFile(field, file) {
       30000, unreadable);
     const form = new FormData();
     form.append('file', new Blob([bytes]), file.name);
-    form.append('field', field);
+    form.append('field', { 'lab-audio': 'audio', 'lab-rttm': 'ref' }[field] || field);  // same upload folders
     if (field === 'audio') form.append('sample_rate', $('#upload-rate').value);
     const data = await postWithProgress('/api/upload', form, field, file.name,
-      120000 + bytes.byteLength / 500);  // 2 min plus 2 s per MB: the server also converts non-WAV audio
+      120000 + bytes.byteLength / 500, status);  // 2 min plus 2 s per MB: the server also converts non-WAV audio
     setVal(field, data.path);
+    if (labeling) return labelFieldSet(field);
     if (field === 'audio') await audioChanged();
     save();
     setStatus(`Uploaded ${file.name}`);
   } catch (e) {
-    setStatus('');
-    showError(e);
+    status('');
+    if (labeling) labError(e); else showError(e);
   }
 }
 
@@ -1465,9 +1502,10 @@ async function uploadFolder(field, fileList) {
   }
 }
 
-// POST `form` with a thin progress line under the field's input row (fetch cannot report upload progress).
+// POST `form` with a thin progress line under the field's input row (fetch cannot report upload progress), and the
+// progress in `status` (setStatus, or labStatus in the Label tab).
 // Once every byte is sent the line pulses until the server answers (saving, converting to WAV).
-function postWithProgress(url, form, field, name, timeoutMs) {
+function postWithProgress(url, form, field, name, timeoutMs, status = setStatus) {
   const row = $(`#${field}`).closest('.row');
   const bar = document.createElement('div');
   bar.className = 'upload-bar';
@@ -1482,11 +1520,11 @@ function postWithProgress(url, form, field, name, timeoutMs) {
       if (!e.lengthComputable) return;
       const pct = Math.round((e.loaded / e.total) * 100);
       fill.style.width = `${pct}%`;
-      setStatus(`Uploading ${name}… ${pct}%`, true);
+      status(`Uploading ${name}… ${pct}%`, true);
     };
     xhr.upload.onload = () => {
       bar.classList.add('busy');
-      setStatus(`Processing ${name} on the server…`, true);
+      status(`Processing ${name} on the server…`, true);
     };
     xhr.onload = () => {
       let data;
@@ -1515,15 +1553,18 @@ function bindInputs() {
     btn.addEventListener('click', () => {
       const field = btn.dataset.clear;
       setVal(field, '');  // lastAudio stays, so the next audio still replaces RTTMs paired with this one
-      save();
+      if (field === 'lab-folder') labFolderChanged();
+      else if (field.startsWith('lab-')) labStore();
+      else save();
       $(`#${field}`).focus();
     });
   }
   const fileInput = $('#file-input');
+  const audioTypes = 'audio/*,.wav,.flac,.mp3,.ogg,.opus,.m4a';
   for (const btn of document.querySelectorAll('[data-upload]')) {
     btn.addEventListener('click', () => {
       fileInput.dataset.field = btn.dataset.upload;
-      fileInput.accept = { audio: 'audio/*,.wav,.flac,.mp3,.ogg,.opus,.m4a', checkpoint: '.nemo,.ckpt', checkpoint2: '.nemo,.ckpt' }[btn.dataset.upload] || '.rttm';
+      fileInput.accept = { audio: audioTypes, 'lab-audio': audioTypes, checkpoint: '.nemo,.ckpt', checkpoint2: '.nemo,.ckpt' }[btn.dataset.upload] || '.rttm';
       fileInput.click();
     });
   }
@@ -1552,7 +1593,11 @@ function bindInputs() {
     const droppedOn = e.target.closest?.('[data-drop]')?.dataset.drop;
     const files = [...e.dataTransfer.files].sort((a, b) => (fieldForFile(a.name) === 'audio' ? -1 : 0) - (fieldForFile(b.name) === 'audio' ? -1 : 0));
     for (const file of files) {
-      if (/\.ya?ml$/i.test(file.name)) await loadYaml(file);
+      if (document.body.dataset.tab === 'label') {  // audio and RTTMs only
+        const field = /\.ya?ml$/i.test(file.name) ? null : { audio: 'lab-audio', ref: 'lab-rttm' }[fieldForFile(file.name)];
+        if (field) await uploadFile(field, file);
+        else labError(`${file.name}: drop an audio file or an RTTM here`);
+      } else if (/\.ya?ml$/i.test(file.name)) await loadYaml(file);
       else await uploadFile(fieldForFile(file.name, droppedOn), file);
     }
   });
@@ -1642,13 +1687,15 @@ function bindInputs() {
 
 function pickFile(field) {
   return new Promise((resolve) => {
-    const folders = mode === 'folder' && field !== 'checkpoint';  // a file then means its folder
-    picker = { field, kind: FIELDS[field].kind, resolve, folders };
+    const folders = mode === 'folder' && ['audio', 'ref', 'hyp'].includes(field);  // a file then means its folder
+    const { kind, title } = FIELDS[field] || LABEL_FIELDS[field];
+    picker = { field, kind, resolve, folders };
     $('#br-title').textContent = folders ? `Select ${{ audio: 'the audio folder (or a dataset folder holding wav/ + rttm/)', ref: 'the reference RTTM folder', hyp: 'the prediction RTTM folder' }[field]}`
-      : `Select ${FIELDS[field].title}`;
+      : `Select ${title}`;
     $('#br-use-dir').hidden = !folders;
     $('#browser').showModal();
-    listDir(val(field) || store.get(`dir.${field}`, '') || store.get('dir.audio', ''));
+    // an empty Labels RTTM field starts at the audio being labeled
+    listDir(val(field) || store.get(`dir.${field}`, '') || (field === 'lab-rttm' && val('lab-audio')) || store.get('dir.audio', ''));
   });
 }
 
@@ -1827,26 +1874,31 @@ function showModel(info) {
   badge.classList.add('ok');
 }
 
-function setStatus(text, spinning = false) {
-  clearInterval(statusTimer);
-  const el = $('#status');
+// The status line next to Run (`id` 'status'), or the Label tab's ('lab-status', see labStatus).
+function setStatus(text, spinning = false, id = 'status') {
+  clearInterval(statusTimers[id]);
+  const el = $(`#${id}`);
+  el.title = text;  // all of it, where the line is cut short
   if (!spinning) { el.textContent = text; return; }
   const started = performance.now();
   const tick = () => {
     el.innerHTML = `<span class="spinner"></span>${esc(text)} ${((performance.now() - started) / 1000).toFixed(1)} s`;
   };
   tick();
-  statusTimer = setInterval(tick, 100);
+  statusTimers[id] = setInterval(tick, 100);
 }
 
-function showError(e) {
-  const box = $('#error');
+function showError(e, id = 'error') {
+  const box = $(`#${id}`);
   const message = typeof e === 'string' ? e : e.message;
   box.innerHTML = `<b>Error:</b> ${esc(message)}${e.trace ? `<details><summary>traceback</summary><pre>${esc(e.trace)}</pre></details>` : ''}`;
   box.hidden = false;
 }
 
-function hideError() { $('#error').hidden = true; }
+function hideError(id = 'error') { $(`#${id}`).hidden = true; }
+
+function labStatus(text, spinning = false) { setStatus(text, spinning, 'lab-status'); }
+function labError(e) { showError(e, 'lab-error'); }
 
 // ---- saved errors -------------------------------------------------------------------------
 
@@ -1947,7 +1999,7 @@ async function openSaved(x) {
 }
 
 function bindSaved() {
-  $('#saved-link').addEventListener('click', () => $('#saved').scrollIntoView({ behavior: 'smooth' }));
+  $('#saved-link').addEventListener('click', () => { setTab('inspect'); $('#saved').scrollIntoView({ behavior: 'smooth' }); });
   $('#saved-search').addEventListener('input', renderSaved);
   $('#saved-zip').addEventListener('click', () => { window.location.href = '/api/saved-export'; });
   const clipStopped = () => { for (const b of document.querySelectorAll('#saved-table .clip')) b.textContent = '▶'; };
@@ -2045,6 +2097,7 @@ function bindResults() {
     if (e.detail === 2) return setHiddenSpeakers([...hiddenSpeakers, ...keys.filter((k) => k !== key)].filter((k) => k !== key));  // solo
     setHiddenSpeakers(hiddenSpeakers.has(key) ? [...hiddenSpeakers].filter((k) => k !== key) : [...hiddenSpeakers, key]);
   });
+  $('#edit-labels').addEventListener('click', editLabels);
   $('#dl-rttm').addEventListener('click', () => download(`${result.file_id}.rttm`, result.rttm, 'text/plain'));
   $('#dl-json').addEventListener('click', () => download(`${result.file_id}.json`, JSON.stringify(result), 'application/json'));
   for (const btn of document.querySelectorAll('[data-sort]')) {
@@ -2095,6 +2148,7 @@ const SEEK_STEP = 5;  // seconds the arrow keys jump
 
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
+    if (document.body.dataset.tab === 'label') return;  // the Label tab has its own keys (bindLabelKeys)
     if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest('input, select, textarea, dialog')) return;
     if (e.key === '[' || e.key === ']') { e.preventDefault(); stepAudio(e.key === ']' ? 1 : -1); return; }
     if (!result) return;
@@ -2125,4 +2179,454 @@ function download(name, text, type) {
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---- labeling -----------------------------------------------------------------------------
+// The Label tab: open an audio file with its RTTM (or none: label it from scratch, or start from the model's
+// prediction), correct the segments in the editor (labeler.js) and save the RTTM on the server (/api/label).
+
+// Show the Inspect or the Label tab; the other one's audio stops.
+function setTab(tab) {
+  document.body.dataset.tab = tab;
+  $('#tab-inspect').hidden = tab !== 'inspect';
+  $('#tab-label').hidden = tab !== 'label';
+  for (const b of document.querySelectorAll('#tabs [data-tab]')) b.classList.toggle('on', b.dataset.tab === tab);
+  (tab === 'label' ? player : labPlayer).pause();
+  store.set('tab', tab);
+}
+
+function labStore() {
+  store.set('label', { audio: val('lab-audio'), rttm: val('lab-rttm'), folder: val('lab-folder') });
+}
+
+// The save folder changed: Save writes the open file's labels there from now on.
+async function labFolderChanged() {
+  labStore();
+  if (!lab) return;
+  try {
+    const t = await api(`/api/label-target?${new URLSearchParams({ audio: lab.audio, rttm: lab.rttm, folder: val('lab-folder') })}`);
+    setVal('lab-save', t.path);
+    labStatus(`Save writes ${t.path}${t.exists ? ' (it exists: Save replaces it)' : ''}`);
+  } catch (e) { labError(e); }
+}
+
+const LABEL_DRAFTS = 20;  // files whose unsaved labels the browser keeps
+
+// Keep the open file's unsaved labels in the browser (`keep` false: forget them), so that closing the page or a crash
+// loses nothing: opening the file again brings them back (restoreDraft). renderLabel calls it after every change.
+function keepDraft(keep) {
+  const drafts = store.get('labelDrafts', {});
+  if (keep) drafts[lab.audio] = { ...editor.labels(), at: Date.now() };
+  else if (lab.audio in drafts) delete drafts[lab.audio];
+  else return;
+  const newest = Object.entries(drafts).sort(([, x], [, y]) => y.at - x.at).slice(0, LABEL_DRAFTS);
+  store.set('labelDrafts', Object.fromEntries(newest));
+}
+
+// Unsaved labels kept from before come back as one edit, so ↶ Undo returns to the RTTM on disk.
+function restoreDraft(draft) {
+  if (toRttm(lab.rec_id, draft) === lab.saved) return keepDraft(false);  // nothing in it that is not on disk
+  editor.applyLabels(draft);
+  labStatus(`Restored your unsaved changes of ${new Date(draft.at).toLocaleString()} · ↶ Undo goes back to the RTTM on disk`);
+}
+
+// A Label tab field was set by Browse, Upload or a drop: a new audio file takes its RTTM along, then both open.
+async function labelFieldSet(field) {
+  if (field === 'lab-audio') await labPair();
+  labStore();
+  return openLabels();
+}
+
+// The audio of the Label tab changed: the Labels RTTM field follows it, as the reference does in the Inspect tab.
+// Returns the pending lookup, so its callers (Open, Enter, the field's change) all wait for the same one.
+function labPair() {
+  const audio = val('lab-audio');
+  if (audio && audio !== labLastAudio) {
+    const prev = labLastAudio, sent = val('lab-rttm');
+    labLastAudio = audio;
+    labPairing = (async () => {
+      try {
+        const pair = await api(`/api/pair?${new URLSearchParams({ audio, prev_audio: prev, ref: sent })}`);
+        if (val('lab-rttm') === sent) setVal('lab-rttm', pair.ref);  // unless edited meanwhile
+      } catch { /* keep the field as it is */ }
+    })();
+  }
+  return labPairing;
+}
+
+// Labels ({ names, segments }) as RTTM text, the way the server writes them.
+function toRttm(recId, { names, segments }) {
+  return segments.map(([s, e, k]) => `SPEAKER ${recId} 1 ${s.toFixed(3)} ${(e - s).toFixed(3)} <NA> <NA> ${names[k]} <NA> <NA>\n`).join('');
+}
+
+function labDirty() {
+  return Boolean(lab) && toRttm(lab.rec_id, editor.labels()) !== lab.saved;
+}
+
+function confirmDiscard() {
+  if (!labDirty()) return true;
+  if (!confirm(`The labels of ${basename(lab.audio)} have unsaved changes. Discard them?`)) return false;
+  keepDraft(false);  // thrown away, so not brought back either
+  return true;
+}
+
+// Open an audio file and its labels: `paths.rttm`, or none (two empty speakers to start from). `at`: playback position.
+async function openLabels(paths = { audio: val('lab-audio'), rttm: val('lab-rttm') }, confirmed = false, at = 0) {
+  if (!paths.audio) return labError('Choose an audio file.');
+  if (!confirmed && !confirmDiscard()) {  // keep editing: the fields go back to the file that is open
+    setVal('lab-audio', lab.audio);
+    setVal('lab-rttm', lab.rttm);
+    labLastAudio = lab.audio;
+    return labStore();
+  }
+  const seq = ++labSeq;
+  labStatus(`Opening ${basename(paths.audio)}…`, true);
+  try {
+    const d = await api(`/api/label?${new URLSearchParams({ ...paths, folder: val('lab-folder') })}`);
+    if (seq !== labSeq) return;
+    const draft = store.get('labelDrafts', {})[d.audio];  // unsaved changes from last time
+    showLabels(d, d.rttm ? d : { names: ['speaker_0', 'speaker_1'], segments: [] }, at);
+    const from = d.original ? `the labels saved in ${tail(d.rttm)} (the original: ${tail(d.original)})` : d.rttm && tail(d.rttm);
+    labStatus(d.rttm ? `Opened ${d.segments.length} segments of ${d.names.length} speakers from ${from}`
+      : 'No RTTM: drag on a speaker lane to add a segment, or start from the model prediction');
+    if (draft) restoreDraft(draft);
+  } catch (e) {
+    if (seq === labSeq) { labStatus(''); labError(e); }
+  }
+}
+
+// Show the file `d` (see /api/label) in the editor with `labels` ({ names, segments }). `saved`: its RTTM text on
+// disk, which unsaved changes are measured against (default: these labels).
+function showLabels(d, labels, at = 0, saved = null) {
+  hideError('lab-error');
+  // drafted: the labels kept in the browser as unsaved (see keepDraft), null when there are none
+  lab = { audio: d.audio, file_id: d.file_id, rec_id: d.rec_id, rttm: d.rttm, duration: d.duration, drafted: null };
+  setVal('lab-audio', d.audio);
+  setVal('lab-rttm', d.rttm);
+  setVal('lab-save', d.save_path);
+  labLastAudio = d.audio;
+  labStore();
+  $('#lab-warnings').innerHTML = d.warnings.map((w) => `<div class="warning">${esc(w)}</div>`).join('');
+  $('#lab-editor').hidden = $('#lab-speakers-block').hidden = false;
+  editor.setLabels({ duration: d.duration, ...labels });
+  lab.saved = saved ?? toRttm(lab.rec_id, editor.labels());
+  if (d.audio !== labAudio) {
+    labAudio = d.audio;
+    labPlayer.pause();
+    loadAudioInto(labPlayer, editor, d.audio, () => labAudio === d.audio, at);
+  } else if (at) editor.seek(at);
+  renderLabel();
+  labTime();
+}
+
+// Start from what the Inspect tab's checkpoint predicts (with its post-processing settings) instead of an RTTM.
+async function predictLabels() {
+  const audio = val('lab-audio'), checkpoint = primaryCk();
+  if (!audio) return labError('Choose an audio file.');
+  if (!checkpoint) return labError('Choose a checkpoint in the Inspect tab first: the prediction comes from it.');
+  if (!confirmDiscard()) return;
+  const seq = ++labSeq;
+  labStatus(`Running ${basename(checkpoint)}…`, true);
+  try {
+    // the RTTM and the folder only say where Save writes (named like the RTTM)
+    const where = new URLSearchParams({ audio, rttm: val('lab-rttm'), folder: val('lab-folder') });
+    const [d, res] = await Promise.all([api(`/api/label?${where}`), api('/api/run', { audio, checkpoint, ...getSettings() })]);
+    if (seq !== labSeq) return;
+    showModel(res.model);
+    // the outputs that never speak are left out
+    const used = [...new Set(res.hyp.segments.map((g) => g[2]))].sort((x, y) => x - y);
+    const labels = { names: used.map((k) => res.hyp.names[k]), segments: res.hyp.segments.map(([s, e, k]) => [s, e, used.indexOf(k)]) };
+    showLabels({ ...d, rttm: '', warnings: [] }, labels, 0, '');  // nothing of it is saved yet
+    labStatus(`Prediction of ${res.model.name}: ${labels.segments.length} segments of ${labels.names.length} speakers · correct them and Save`);
+  } catch (e) {
+    if (seq === labSeq) { labStatus(''); labError(e); }
+  }
+}
+
+async function saveLabels() {
+  if (!lab) return;
+  document.activeElement?.blur();  // a speaker name or a time being typed is applied first
+  const path = val('lab-save'), labels = editor.labels();
+  if (!path) return labError('Give the RTTM to save to under Save as.');
+  labStatus('Saving…', true);
+  try {
+    const res = await api('/api/label', { path, rec_id: lab.rec_id, ...labels });
+    hideError('lab-error');
+    Object.assign(lab, { rttm: res.path, saved: toRttm(lab.rec_id, labels), savedAt: new Date().toLocaleTimeString() });
+    setVal('lab-rttm', res.path);
+    setVal('lab-save', res.path);
+    labStore();
+    labStatus([`Saved ${res.segments} segments to ${tail(res.path)}`,
+      res.backup && `a copy of the original: data/label_backups/${basename(res.backup)}`,
+      res.kept && `${res.kept} lines of other recordings kept`].filter(Boolean).join(' · '));
+    renderLabel();
+  } catch (e) {
+    labStatus('');
+    labError(e);
+  }
+}
+
+// Label tab → Inspect tab: this file with the saved labels as its reference RTTM, run.
+async function inspectLabels() {
+  if (!lab) return;
+  if (!lab.rttm || labDirty()) return labError('Save the labels first: the Inspect tab reads them from the RTTM file.');
+  setTab('inspect');
+  setMode('file');
+  setVal('audio', lab.audio);
+  setVal('ref', lab.rttm);
+  await audioChanged();  // a prediction RTTM that went with the previous file follows this one
+  save();
+  run();
+}
+
+// Inspect tab → Label tab ("✎ Edit labels"): correct the reference RTTM of the file shown (or label it from
+// scratch), at the same place.
+async function editLabels() {
+  if (!result) return;
+  if (!confirmDiscard()) return setTab('label');  // keep the unsaved labels, to save them first
+  const [a, b] = timeline.view, at = player.currentTime;
+  setTab('label');
+  await openLabels({ audio: result.audio, rttm: result.ref ? shown.ref : '' }, true, at);
+  if (lab?.audio === result.audio) editor.zoomTo(a, b);
+}
+
+// ◀ ▶ and [ ]: the previous / next audio file in the folder, with its RTTM.
+async function stepLabelAudio(step) {
+  const current = val('lab-audio');
+  if (!current) return;
+  try {
+    const { path } = await api(`/api/neighbor?${new URLSearchParams({ path: current, step })}`);
+    if (!path) return labStatus(step > 0 ? 'Last file in this folder' : 'First file in this folder');
+    if (!confirmDiscard()) return;
+    setVal('lab-audio', path);
+    await labPair();
+    labStore();
+    openLabels(undefined, true);
+  } catch (e) { labError(e); }
+}
+
+function labelChanged(note) {
+  renderLabel();
+  if (note) labStatus(note);
+}
+
+function renderLabel() {
+  if (!lab) return;
+  const text = toRttm(lab.rec_id, editor.labels()), dirty = text !== lab.saved;
+  if ((dirty ? text : null) !== lab.drafted) {  // the labels changed: keep them in the browser until saved
+    keepDraft(dirty);
+    lab.drafted = dirty ? text : null;
+  }
+  $('#lab-file').textContent = `· ${basename(lab.audio)} · ${lab.rttm ? tail(lab.rttm) : 'new labels'}`;
+  $('#lab-file').title = lab.rttm || lab.audio;
+  $('#lab-dirty').textContent = dirty ? '● unsaved changes · draft kept' : lab.savedAt ? `saved at ${lab.savedAt}` : 'no changes';
+  $('#lab-dirty').title = dirty ? 'Kept in this browser after every change: if the page closes, opening this file again brings them back' : '';
+  $('#lab-dirty').classList.toggle('dirty', dirty);
+  $('#tabs [data-tab="label"]').classList.toggle('dirty', dirty);
+  $('#lab-undo').disabled = !editor.undoStack.length;
+  $('#lab-redo').disabled = !editor.redoStack.length;
+  renderSelection();
+  renderLabelSpeakers();
+}
+
+// The bar above the editor: speaker, start and end of the selected segment.
+function renderSelection() {
+  const g = editor.selected;
+  $('#lab-sel-none').hidden = Boolean(g);
+  $('#lab-sel').hidden = !g;
+  if (!g) return;
+  $('#lab-sel-color').style.background = editor.color(g.k);
+  $('#lab-sel-spk').innerHTML = [...editor.speakers.map((sp, k) => `<option value="${k}">${k < 9 ? `${k + 1} · ` : ''}${esc(sp.name)}</option>`),
+    `<option value="${editor.speakers.length}">+ new speaker</option>`].join('');
+  $('#lab-sel-spk').value = String(g.k);
+  for (const [id, x] of [['#lab-sel-start', g.s], ['#lab-sel-end', g.e]]) {
+    if (document.activeElement !== $(id)) $(id).value = x.toFixed(3);  // not while it is being typed in
+  }
+  $('#lab-sel-dur').textContent = `${(g.e - g.s).toFixed(2)} s`;
+}
+
+function renderLabelSpeakers() {
+  const sp = editor.speakers;
+  const per = sp.map((_, k) => editor.segs.filter((g) => g.k === k).map((g) => [g.s, g.e]));
+  const len = (segs) => segs.reduce((acc, [s, e]) => acc + e - s, 0);
+  const talk = per.map((segs) => len(mergeSegs(segs))), speech = len(mergeSegs(per.flat()));
+  $('#lab-spk-count').textContent = sp.length ? `${sp.length}` : '';
+  const merge = (k) => (sp.length < 2 ? '' : `<select class="small spk-merge" title="Give all its segments to another speaker">
+    <option value="">merge into…</option>${sp.map((o, j) => (j === k ? '' : `<option value="${j}">${esc(o.name)}</option>`)).join('')}</select>`);
+  const rows = sp.map((s, k) => `
+    <tr data-k="${k}">
+      <td>${k < 9 ? `<kbd>${k + 1}</kbd>` : ''}</td>
+      <td>${dot(editor.color(k))}<input class="spk-name" value="${esc(s.name)}" spellcheck="false" autocomplete="off"
+        title="Rename (spaces become _: RTTM fields are separated by spaces)"></td>
+      <td class="num">${per[k].length}</td>
+      <td class="num">${talk[k].toFixed(1)}</td>
+      <td class="num">${pct(speech ? talk[k] / speech : null, 1)}</td>
+      <td class="nowrap">${merge(k)} <button class="btn icon spk-remove" title="Delete this speaker and its segments">✕</button></td>
+    </tr>`).join('');
+  $('#lab-speakers').innerHTML = `
+    <table class="table">
+      <thead><tr><th title="Key that gives the selected segment to this speaker">key</th><th>speaker</th><th class="num">segments</th>
+        <th class="num">talk (s)</th><th class="num" title="Share of all speech">share</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="hint">${editor.segs.length} segments · speech ${secs(speech)} of ${fmtTime(lab.duration)} · overlap ${secs(len(overlapRegions(per)))}</p>`;
+}
+
+function labTime() {
+  $('#lab-time').textContent = `${fmtTime(labPlayer.currentTime)} / ${fmtTime(lab?.duration || 0)}`;
+}
+
+// ▶ / space: with a segment selected, just that segment, from the playback cursor when it is in it (so a pause
+// resumes), else from its start, to its end; with none, the file from the cursor. Pauses while playing.
+function labPlay() {
+  if (!labPlayer.src) return;
+  if (!labPlayer.paused) return labPlayer.pause();
+  const g = editor.selected, t = labPlayer.currentTime;
+  if (!g) return labPlayer.play();
+  editor.playRange(t >= g.s && t < g.e - 0.05 ? t : g.s, g.e);
+}
+
+function labSplit() {
+  if (editor.selected && !editor.splitSelected(labPlayer.currentTime)) {
+    labStatus('To split, click the selected segment where it should be cut (or pause there), then press s');
+  }
+}
+
+function labJoin() {
+  if (editor.selected && !editor.joinSelected()) labStatus('No later segment of this speaker to join');
+}
+
+function bindLabel() {
+  const fields = store.get('label', {});
+  for (const k of ['audio', 'rttm', 'folder']) setVal(`lab-${k}`, fields[k] || '');
+  labLastAudio = val('lab-audio');
+  setTab(store.get('tab', 'inspect') === 'label' ? 'label' : 'inspect');
+  if (document.body.dataset.tab === 'label' && val('lab-audio')) openLabels(undefined, true);
+  for (const b of document.querySelectorAll('#tabs [data-tab]')) {
+    b.addEventListener('click', () => {
+      setTab(b.dataset.tab);
+      if (b.dataset.tab === 'label' && !lab && val('lab-audio')) openLabels(undefined, true);
+    });
+  }
+  for (const id of Object.keys(LABEL_FIELDS)) {
+    $(`#${id}`).addEventListener('change', async () => { if (id === 'lab-audio') await labPair(); labStore(); });
+    $(`#${id}`).addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      e.target.blur();  // the keys go to the editor now (space plays, n selects, ...)
+      if (id === 'lab-audio') await labPair();
+      labStore();
+      openLabels();
+    });
+  }
+  $('#lab-open').addEventListener('click', async () => { await labPair(); labStore(); openLabels(); });
+  $('#lab-predict').addEventListener('click', predictLabels);
+  $('#lab-prev').addEventListener('click', () => stepLabelAudio(-1));
+  $('#lab-next').addEventListener('click', () => stepLabelAudio(1));
+  $('#lab-save-btn').addEventListener('click', saveLabels);
+  $('#lab-save').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveLabels(); });
+  $('#lab-folder').addEventListener('change', labFolderChanged);
+  $('#lab-folder').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });  // blur: change
+  $('#lab-download').addEventListener('click', () => lab && download(`${lab.file_id}.rttm`, toRttm(lab.rec_id, editor.labels()), 'text/plain'));
+  $('#lab-inspect').addEventListener('click', inspectLabels);
+
+  // playback and view
+  $('#lab-play').addEventListener('click', labPlay);
+  $('#lab-restart').addEventListener('click', () => { if (labPlayer.src) { editor.seekBy(-labPlayer.currentTime); labPlayer.play(); } });
+  labPlayer.addEventListener('play', () => { $('#lab-play').textContent = '❚❚'; });
+  labPlayer.addEventListener('pause', () => { $('#lab-play').textContent = '▶'; });
+  labPlayer.addEventListener('timeupdate', labTime);
+  labPlayer.addEventListener('seeked', labTime);
+  $('#lab-speed').addEventListener('change', (e) => {
+    labPlayer.defaultPlaybackRate = labPlayer.playbackRate = parseFloat(e.target.value);  // the default one stays for the next file
+    e.target.blur();
+  });
+  const volume = store.get('volume', { level: 1, muted: false });
+  Object.assign(labPlayer, { volume: volume.level, muted: volume.muted });
+  $('#lab-zoom-in').addEventListener('click', () => editor.zoom(0.5));
+  $('#lab-zoom-out').addEventListener('click', () => editor.zoom(2));
+  $('#lab-zoom-fit').addEventListener('click', () => editor.fit());
+  $('#lab-undo').addEventListener('click', () => editor.undo());
+  $('#lab-redo').addEventListener('click', () => editor.redo());
+  $('#lab-snap').checked = editor.snap = store.get('labSnap', true);
+  $('#lab-snap').addEventListener('change', (e) => { editor.snap = e.target.checked; store.set('labSnap', editor.snap); });
+  $('#lab-add-speaker').addEventListener('click', () => editor.addSpeaker());
+
+  // the selected segment
+  $('#lab-sel-spk').addEventListener('change', (e) => { editor.setSpeaker(Number(e.target.value)); e.target.blur(); });
+  for (const id of ['#lab-sel-start', '#lab-sel-end']) {
+    $(id).addEventListener('change', () => {
+      if (!editor.setTimes(parseFloat($('#lab-sel-start').value), parseFloat($('#lab-sel-end').value))) {
+        labStatus('The end must be at least 0.02 s after the start');
+      }
+      const g = editor.selected;  // what it became (clamped to the file, merged), also in the field being typed in
+      if (g) { $('#lab-sel-start').value = g.s.toFixed(3); $('#lab-sel-end').value = g.e.toFixed(3); }
+    });
+  }
+  $('#lab-sel-play').addEventListener('click', () => { const g = editor.selected; if (g) editor.playRange(g.s, g.e); });
+  $('#lab-sel-split').addEventListener('click', labSplit);
+  $('#lab-sel-join').addEventListener('click', labJoin);
+  $('#lab-sel-delete').addEventListener('click', () => editor.deleteSelected());
+
+  // speakers: rename, merge into another, delete
+  $('#lab-speakers').addEventListener('change', (e) => {
+    const k = Number(e.target.closest('tr[data-k]')?.dataset.k);
+    if (Number.isNaN(k)) return;
+    if (e.target.classList.contains('spk-name') && !editor.renameSpeaker(k, e.target.value)) {
+      labError(`"${e.target.value}" cannot be a speaker name: it is empty or another speaker has it.`);
+      renderLabelSpeakers();
+    } else if (e.target.classList.contains('spk-merge') && e.target.value !== '') editor.mergeSpeaker(k, Number(e.target.value));
+  });
+  $('#lab-speakers').addEventListener('click', (e) => {
+    if (!e.target.closest('.spk-remove')) return;
+    const k = Number(e.target.closest('tr[data-k]').dataset.k), n = editor.segs.filter((g) => g.k === k).length;
+    if (n && !confirm(`Delete ${editor.speakers[k].name} and its ${n} segment${n > 1 ? 's' : ''}?`)) return;
+    editor.removeSpeaker(k);
+  });
+  window.addEventListener('beforeunload', (e) => {  // unsaved labels: ask before leaving the page
+    if (labDirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+  bindLabelKeys();
+}
+
+function bindLabelKeys() {
+  document.addEventListener('keydown', (e) => {
+    if (document.body.dataset.tab !== 'label') return;
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key, mod = e.ctrlKey || e.metaKey;
+    if (mod && key === 's') { e.preventDefault(); saveLabels(); return; }  // also while typing in a field
+    if (e.target.closest('input, select, textarea, dialog')) return;
+    if (mod) {
+      const action = !e.altKey && { z: () => (e.shiftKey ? editor.redo() : editor.undo()), y: () => editor.redo() }[key];
+      if (action) { e.preventDefault(); action(); }
+      return;
+    }
+    if (e.altKey) return;
+    if (key === '[' || key === ']') { e.preventDefault(); stepLabelAudio(key === ']' ? 1 : -1); return; }
+    if (!lab) return;
+    if (editor.drag) { if (key === 'Escape') editor.cancelDrag(); return; }
+    const g = editor.selected, t = labPlayer.currentTime;
+    if (/^[1-9]$/.test(key)) { e.preventDefault(); editor.setSpeaker(Number(key) - 1); return; }
+    const times = (s, end) => g && !editor.setTimes(s, end) && labStatus('The end must be at least 0.02 s after the start');
+    const actions = {
+      ' ': () => $('#lab-play').click(),
+      Home: () => $('#lab-restart').click(),
+      Enter: () => g && editor.playRange(g.s, g.e),
+      Delete: () => editor.deleteSelected(),
+      Backspace: () => editor.deleteSelected(),
+      Escape: () => editor.select(null),
+      s: labSplit,
+      j: labJoin,
+      i: () => times(t, g?.e),
+      o: () => times(g?.s, t),
+      n: () => editor.step(1),
+      p: () => editor.step(-1),
+      ArrowLeft: () => (e.shiftKey ? editor.pan(-0.25) : editor.seekBy(-SEEK_STEP)),
+      ArrowRight: () => (e.shiftKey ? editor.pan(0.25) : editor.seekBy(SEEK_STEP)),
+      '+': () => editor.zoom(0.5),
+      '=': () => editor.zoom(0.5),
+      '-': () => editor.zoom(2),
+      0: () => editor.fit(),
+    };
+    const action = actions[key];
+    if (action) { e.preventDefault(); action(); }
+  });
 }

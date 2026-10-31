@@ -12,11 +12,15 @@
   <header class="top">
     <h1>Diarization Inspector</h1>
     <span class="muted">Sortformer · NeMo</span>
+    <nav class="tabs" id="tabs">
+      <button class="tab" data-tab="inspect" title="Run a checkpoint (or open a prediction RTTM) and see where it is wrong">Inspect</button>
+      <button class="tab" data-tab="label" title="Open an audio file and its RTTM, correct the labels and save them">Label</button>
+    </nav>
     <span id="model-badge" class="badge">no model loaded</span>
     <button id="saved-link" class="badge saved-badge" title="Go to the saved errors" hidden></button>
   </header>
 
-  <main>
+  <main id="tab-inspect">
     <div class="grid inputs">
       <section class="block">
         <span class="block-label">Inputs</span>
@@ -200,6 +204,7 @@
           <label class="check" id="show-diff-wrap" title="Mark each predicted speaker where it differs from its reference speaker"><input type="checkbox" id="show-diff" checked> differences</label>
           <span class="grow"></span>
           <button id="fullscreen-btn" class="btn icon" title="Full screen (f)">⛶</button>
+          <button id="edit-labels" class="btn" title="Correct the reference RTTM of this file (or label it from scratch) in the Label tab, at this position">✎ Edit labels</button>
           <button id="dl-rttm" class="btn">Download RTTM</button>
           <button id="dl-json" class="btn" title="Everything, including the raw speaker probabilities">JSON</button>
         </div>
@@ -250,6 +255,126 @@
     </section>
   </main>
 
+  <main id="tab-label" hidden>
+    <div class="grid inputs">
+      <section class="block">
+        <span class="block-label">Label · open</span>
+        <div class="field" data-drop="lab-audio">
+          <label for="lab-audio">Audio <small>the recording to label · server path, browse, upload, or drop a file</small></label>
+          <div class="row">
+            <input id="lab-audio" placeholder="/path/to/audio.wav" spellcheck="false" autocomplete="off">
+            <button class="btn icon" data-clear="lab-audio" title="Clear this field">✕</button>
+            <button class="btn" data-browse="lab-audio">Browse</button>
+            <button class="btn" data-upload="lab-audio">Upload</button>
+            <button class="btn icon" id="lab-prev" title="Previous file in this folder · [">◀</button>
+            <button class="btn icon" id="lab-next" title="Next file in this folder · ]">▶</button>
+          </div>
+        </div>
+        <div class="field" data-drop="lab-rttm">
+          <label for="lab-rttm">Labels RTTM <small>optional · the labels to correct · found next to the audio or in ../rttm/ · empty: start from scratch</small></label>
+          <div class="row">
+            <input id="lab-rttm" placeholder="found automatically next to the audio, or ../rttm/" spellcheck="false" autocomplete="off">
+            <button class="btn icon" data-clear="lab-rttm" title="Clear this field">✕</button>
+            <button class="btn" data-browse="lab-rttm">Browse</button>
+            <button class="btn" data-upload="lab-rttm">Upload</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="lab-open" class="btn primary">Open</button>
+          <button id="lab-predict" class="btn" title="Start from what the checkpoint of the Inspect tab predicts (with its post-processing) instead of the RTTM">Start from model prediction</button>
+          <span id="lab-status" class="muted"></span>
+        </div>
+        <div id="lab-error" class="error" hidden></div>
+      </section>
+
+      <section class="block">
+        <span class="block-label">Save</span>
+        <div class="field">
+          <label for="lab-folder">Save to folder <small>optional · the original RTTMs stay as they are · empty: Save replaces the RTTM opened</small></label>
+          <div class="row">
+            <input id="lab-folder" placeholder="a name, e.g. rttm_corrected, or a full path" spellcheck="false" autocomplete="off"
+              title="A name: a folder beside wav/ and rttm/ (or in the audio's folder), made when Save first writes into it. A file opens with the labels saved there before, if any.">
+            <button class="btn icon" data-clear="lab-folder" title="Clear this field: Save replaces the RTTM opened">✕</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="lab-save">Save as <small>where Save writes</small></label>
+          <div class="row">
+            <input id="lab-save" placeholder="/path/to/rttm/audio.rttm" spellcheck="false" autocomplete="off">
+            <button id="lab-save-btn" class="btn primary" title="Save (ctrl+s)">Save</button>
+          </div>
+        </div>
+        <div class="row tight">
+          <span id="lab-dirty" class="muted small"></span>
+          <span class="grow"></span>
+          <button id="lab-download" class="btn small" title="The labels as they are now, saved or not">Download RTTM</button>
+          <button id="lab-inspect" class="btn small" title="Open this file in the Inspect tab with the saved labels as its reference">Inspect with these labels</button>
+        </div>
+        <p class="hint">Unsaved changes are kept in this browser, so closing the page loses nothing: they come back when the
+          file opens again. Replacing an RTTM keeps a copy of the original in data/label_backups/.</p>
+      </section>
+    </div>
+
+    <div id="lab-warnings" class="warnings"></div>
+
+    <section id="lab-editor" class="block viewer" hidden>
+      <span class="block-label">Labels <span id="lab-file" class="model-name"></span></span>
+      <div class="toolbar">
+        <button id="lab-restart" class="btn icon" title="Play from the start (Home)">⏮</button>
+        <button id="lab-play" class="btn icon" title="Play / pause (space) · with a segment selected: just that segment">▶</button>
+        <span id="lab-time" class="time">0:00.00 / 0:00.00</span>
+        <select id="lab-speed" title="Playback speed">
+          <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
+          <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+        </select>
+        <span class="sep"></span>
+        <button id="lab-zoom-out" class="btn icon" title="Zoom out (−)">−</button>
+        <button id="lab-zoom-in" class="btn icon" title="Zoom in (+)">+</button>
+        <button id="lab-zoom-fit" class="btn" title="Whole file (0)">Fit</button>
+        <span class="sep"></span>
+        <button id="lab-undo" class="btn" title="Undo (ctrl+z)">↶ Undo</button>
+        <button id="lab-redo" class="btn" title="Redo (ctrl+shift+z)">↷ Redo</button>
+        <label class="check" title="A dragged edge snaps to the other segments' edges and to the playback cursor (hold ctrl not to)"><input type="checkbox" id="lab-snap" checked> snap</label>
+        <span class="grow"></span>
+        <button id="lab-add-speaker" class="btn" title="Add an empty speaker lane">+ speaker</button>
+      </div>
+      <div class="selbar">
+        <span id="lab-sel-none" class="muted">Click a segment to select it · drag on an empty part of a lane to add one</span>
+        <span id="lab-sel" class="selbar-fields" hidden>
+          <i id="lab-sel-color" class="swatch"></i>
+          <select id="lab-sel-spk" title="Speaker of this segment (keys 1–9)"></select>
+          <label>start <input id="lab-sel-start" type="number" min="0" step="0.01" title="Start (s) · i: set to the playback cursor"></label>
+          <label>end <input id="lab-sel-end" type="number" min="0" step="0.01" title="End (s) · o: set to the playback cursor"></label>
+          <span id="lab-sel-dur" class="muted"></span>
+          <button id="lab-sel-play" class="btn small" title="Play this segment (Enter)">▶ play</button>
+          <button id="lab-sel-split" class="btn small" title="Cut it in two at the playback cursor (s)">split</button>
+          <button id="lab-sel-join" class="btn small" title="Join it with the next segment of the same speaker (j)">join next</button>
+          <button id="lab-sel-delete" class="btn small" title="Delete it (Delete)">delete</button>
+        </span>
+      </div>
+      <canvas id="lab-overview" title="Whole file · colored: the labels · click or drag to move"></canvas>
+      <div class="canvas-wrap">
+        <canvas id="lab-canvas"></canvas>
+        <div id="lab-tooltip" hidden></div>
+      </div>
+      <p class="hint">
+        drag a segment: move it (up / down: to another speaker, to "+ new speaker": a new one) · drag its edges: start / end ·
+        drag on an empty lane: add a segment · click a segment: select it (cursor to its start; click it again: cursor there) ·
+        double-click a segment: play it · edges snap to other edges and to the cursor (hold ctrl not to) · wheel: zoom ·
+        shift+wheel or drag the waveform: pan · shift+drag the waveform: zoom to region · click the waveform: seek ·
+        keys: <kbd>space</kbd> play (a segment selected: just that segment) <kbd>Enter</kbd> play selected from its start <kbd>1</kbd>–<kbd>9</kbd> speaker <kbd>s</kbd> split at cursor
+        <kbd>j</kbd> join next <kbd>i</kbd> <kbd>o</kbd> start / end at cursor <kbd>Delete</kbd> delete <kbd>n</kbd> <kbd>p</kbd> next / previous segment
+        <kbd>ctrl</kbd>+<kbd>z</kbd> undo <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>z</kbd> redo <kbd>ctrl</kbd>+<kbd>s</kbd> save
+        <kbd>←</kbd><kbd>→</kbd> seek 5 s <kbd>+</kbd><kbd>−</kbd><kbd>0</kbd> zoom <kbd>[</kbd> <kbd>]</kbd> previous / next file <kbd>Esc</kbd> deselect / cancel a drag
+      </p>
+    </section>
+
+    <section id="lab-speakers-block" class="block" hidden>
+      <span class="block-label">Speakers <span id="lab-spk-count" class="count"></span></span>
+      <div id="lab-speakers" class="scroll"></div>
+    </section>
+  </main>
+
   <dialog id="browser">
     <div class="dlg-head">
       <strong id="br-title">Select file</strong>
@@ -264,5 +389,6 @@
   <input type="file" id="file-input" hidden>
   <input type="file" id="folder-input" webkitdirectory multiple hidden>
   <audio id="player" preload="auto"></audio>
+  <audio id="lab-player" preload="auto"></audio>
 </body>
 </html>

@@ -14,7 +14,7 @@
 export const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#76b7b2',
   '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac'];
 
-const GUTTER = 150;      // left column for lane labels (px)
+export const GUTTER = 150;  // left column for lane labels (px)
 const PAD_RIGHT = 12;
 const MIN_SPAN = 0.05;   // deepest zoom: 50 ms across the plot
 const TICK_STEPS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
@@ -203,6 +203,7 @@ export class Timeline {
       }
     }
     if (p.currentTime !== this.lastCursor) { this.lastCursor = p.currentTime; this.redraw = true; }
+    if (!this.width) return;  // hidden (the other tab is shown): it draws once it shows again and _layout runs
     if (this.dirty) { this._drawLayer(); this.dirty = false; this.redraw = true; }
     if (this.redraw) { this._composite(); this._drawOverview(); this.redraw = false; }
   }
@@ -595,7 +596,13 @@ export class Timeline {
       if (e.shiftKey || Math.abs(dx) > Math.abs(dy)) this.pan((dx || dy) / this.plotWidth);
       else this.zoom(Math.exp(dy * 0.002), e.offsetX > GUTTER ? this.xToTime(e.offsetX) : undefined);
     }, { passive: false });
+    this._bindPointer();
+    this._bindOverview();
+  }
 
+  // Clicks and drags on the timeline (the label editor, labeler.js, has its own).
+  _bindPointer() {
+    const c = this.canvas;
     c.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !this.duration) return;
       c.setPointerCapture(e.pointerId);
@@ -652,7 +659,10 @@ export class Timeline {
       this.redraw = true;
     });
     c.addEventListener('dblclick', () => this.fit());
+  }
 
+  // The overview strip (click or drag to move the view), and the player events the view follows.
+  _bindOverview() {
     const ov = this.overview;
     const centerAt = (e) => {
       const t = (e.offsetX / ov.clientWidth) * this.duration;
@@ -668,7 +678,9 @@ export class Timeline {
     ov.addEventListener('pointermove', (e) => { if (this.ovDrag) centerAt(e); });
     ov.addEventListener('pointerup', () => { this.ovDrag = false; });
 
-    this.player.addEventListener('pause', () => { this.stopAt = null; });
+    // the event comes later than pause(): when the player plays again by then (a quick pause + play of a range),
+    // it must not clear the new range's end
+    this.player.addEventListener('pause', () => { if (this.player.paused) this.stopAt = null; });
     this.player.addEventListener('ended', () => {  // B at the very end of the file
       if (this.loop?.length === 2) { this.player.currentTime = this.loop[0]; this.player.play(); }
     });
